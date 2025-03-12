@@ -68,7 +68,7 @@ def fed_run():
     client_dict = {}
     recorder = Recorder()
 
-    trainset_config {'users': ['user_id1', ...], 'user_data': {'user_id1': train_data, ...}, 'num_samples': number}
+    # trainset_config {'users': ['user_id1', ...], 'user_data': {'user_id1': train_data, ...}, 'num_samples': number}
     trainset_config, testset = divide_data(num_client=config["system"]["num_client"], 
                                         num_local_class=config["system"]["num_local_class"], 
                                         dataset_name=config["system"]["dataset"],
