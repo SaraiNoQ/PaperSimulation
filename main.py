@@ -72,15 +72,16 @@ def fed_run():
     recorder = Recorder()
 
     # trainset_config {'users': ['user_id1', ...], 'user_data': {'user_id1': train_data, ...}, 'num_samples': number}
-    # trainset_config, testset = divide_data(num_client=config["system"]["num_client"], 
-    #                                     num_local_class=config["system"]["num_local_class"], 
-    #                                     dataset_name=config["system"]["dataset"],
-    #                                     i_seed=config["system"]["i_seed"])
-    
-    trainset_config, testset = divide_noniid_data(num_client=config["system"]["num_client"], 
+    if (config["system"]["noniid"]):
+        trainset_config, testset = divide_noniid_data(num_client=config["system"]["num_client"], 
                                         imbalance_factor=config["system"]["imbalance_factor"], 
                                         dataset_name=config["system"]["dataset"],
                                         i_seed=config["system"]["i_seed"])
+    else:
+        trainset_config, testset = divide_data(num_client=config["system"]["num_client"], 
+                                            num_local_class=config["system"]["num_local_class"], 
+                                            dataset_name=config["system"]["dataset"],
+                                            i_seed=config["system"]["i_seed"])
     
     max_acc = 0
 
