@@ -67,9 +67,6 @@ class FedClient(object):
         # 1. 数据加载
         train_loader = DataLoader(self.trainset, batch_size=self._batch_size, shuffle=True)
 
-        # 计算js散度
-        model_origin = self.model
-
         # 2. 模型与优化器设置
         self.model.to(self._device)
         # optimizer = torch.optim.SGD(self.model.parameters(), lr=self._lr, momentum=self._momentum)
@@ -92,11 +89,6 @@ class FedClient(object):
                     optimizer.zero_grad()
                     loss.backward()
                     optimizer.step()
-
-        # 计算js散度
-        sim_score_same, js_div_same = calculate_model_similarity(model_origin, self.model)
-        print(f"相似度分数: {sim_score_same:.6f}")
-        print(f"JS散度: {js_div_same:.6f}")
 
         # 返回模型的权重参数（Weights），该字典包含模型所有可学习参数（如全连接层权重、卷积核参数等）的当前值
         return self.model.state_dict(), self.n_data, loss.data.cpu().numpy()

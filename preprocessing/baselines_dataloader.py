@@ -6,6 +6,7 @@ from tqdm import tqdm  # 进度条显示
 from torch.utils.data import Subset, DataLoader  # 数据集处理工具
 import os  # 操作系统接口
 import PIL  # 图像处理库
+import numpy as np  # 用于生成狄利克雷分布
 
 def load_data(name, root='./data', download=True, save_pre_data=True):
     """
@@ -208,6 +209,98 @@ def divide_data(num_client=1, num_local_class=10, dataset_name='emnist', i_seed=
 
     return trainset_config, testset
 
+def divide_noniid_data(num_client=1, imbalance_factor=0.6, dataset_name='emnist', i_seed=0):
+    """
+    将数据集以非独立同分布的方式分割给不同客户端
+    
+    参数:
+    - num_client: 客户端数量
+    - imbalance_factor: 不平衡因子(0-1之间)，越大分布越不均衡
+    - dataset_name: 数据集名称
+    - i_seed: 随机种子
+    
+    返回:
+    - trainset_config: 训练集配置
+    - testset: 测试集
+    """
+    torch.manual_seed(i_seed)
+    np.random.seed(i_seed)
+    
+    # 加载数据集
+    trainset, testset, num_classes = load_data(dataset_name, download=True, save_pre_data=False)
+    
+    # 初始化配置字典
+    trainset_config = {
+        'users': [],
+        'user_data': {},
+        'num_samples': []
+    }
+    
+    # 为每个类别创建数据索引列表
+    class_indices = {}
+    for cls in range(num_classes):
+        indices = torch.nonzero(trainset.targets == cls).squeeze()
+        class_indices[cls] = indices[torch.randperm(len(indices))]
+    
+    # 计算每个客户端的目标类别分布
+    def generate_dirichlet_distribution():
+        """生成狄利克雷分布的类别权重"""
+        alpha = [1.0 - imbalance_factor] * num_classes  # alpha越小，分布越不均衡
+        return np.random.dirichlet(alpha)
+    
+    # 为每个客户端分配数据
+    client_distributions = []
+    for i in range(num_client):
+        client_distributions.append(generate_dirichlet_distribution())
+    
+    # 归一化客户端分布
+    client_distributions = np.array(client_distributions)
+    client_distributions = client_distributions / client_distributions.sum(axis=0, keepdims=True)
+    
+    # 为每个客户端分配数据
+    for i in range(num_client):
+        user_id = f'f_{i:05d}'
+        user_data_indices = []
+        
+        # 根据分布为每个类别分配数据
+        for cls in range(num_classes):
+            # 计算该客户端在该类别上应获得的数据量
+            class_size = len(class_indices[cls])
+            num_samples = int(class_size * client_distributions[i][cls])
+            
+            # 确保每个类别至少有一些数据
+            num_samples = max(1, min(num_samples, len(class_indices[cls])))
+            
+            # 获取数据索引
+            if len(class_indices[cls]) > 0:
+                selected_indices = class_indices[cls][:num_samples]
+                user_data_indices.extend(selected_indices.tolist())
+                class_indices[cls] = class_indices[cls][num_samples:]
+        
+        # 创建用户数据子集
+        if len(user_data_indices) > 0:
+            user_data = Subset(trainset, user_data_indices)
+            
+            # 更新配置
+            trainset_config['users'].append(user_id)
+            trainset_config['user_data'][user_id] = user_data
+            trainset_config['num_samples'].append(len(user_data_indices))
+    
+    # 打印分布情况统计
+    print("\n数据分布统计:")
+    print("-" * 50)
+    for i, user_id in enumerate(trainset_config['users']):
+        user_data = trainset_config['user_data'][user_id]
+        if isinstance(user_data, Subset):
+            targets = trainset.targets[user_data.indices]
+            unique, counts = torch.unique(targets, return_counts=True)
+            class_dist = dict(zip(unique.tolist(), counts.tolist()))
+            print(f"客户端 {user_id}:")
+            print(f"总样本数: {len(user_data)}")
+            print(f"类别分布: {class_dist}")
+            print("-" * 30)
+    
+    return trainset_config, testset
 
 if __name__ == "__main__":
     # 'MNIST', 'EMNIST', 'FashionMNIST', 'CelebA', 'CIFAR10', 'QMNIST', 'SVHN'
@@ -217,4 +310,15 @@ if __name__ == "__main__":
     #     print(name)
     #     divide_data(num_client=20, num_local_class=2, dataset_name=name, i_seed=0)
 
-    divide_data(num_client=50, num_local_class=2, dataset_name='MNIST', i_seed=0)
+    # divide_data(num_client=50, num_local_class=2, dataset_name='MNIST', i_seed=0)
+
+    # 测试不同的不平衡因子
+    for imbalance in [0.3, 0.6, 0.9]:
+        print(f"\n测试不平衡因子: {imbalance}")
+        print("=" * 60)
+        trainset_config, testset = divide_noniid_data(
+            num_client=5,
+            imbalance_factor=imbalance,
+            dataset_name='MNIST',
+            i_seed=42
+        )
