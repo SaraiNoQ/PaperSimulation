@@ -150,7 +150,7 @@ def fed_run():
         print("客户端列表:", members)
 
     # 5. 可视化聚类结果
-    visualize_clustering_results(similarity_matrix, cluster_labels, n_clusters, "JS Distance")
+    visualize_clustering_results(similarity_matrix, cluster_labels, n_clusters, config["system"]["similarity_method"])
 
     # 保存聚类结果
     clustering_results = {
@@ -163,7 +163,7 @@ def fed_run():
     # 将结果保存到JSON文件
     clustering_file = os.path.join(
         config["system"]["res_root"],
-        f'clustering_results_{config["system"]["dataset"]}_{config["system"]["num_client"]}.json'
+        f'clustering_results_{config["system"]["dataset"]}_{config["system"]["num_client"]}_{config["system"]["similarity_method"]}_{config["system"]["imbalance_factor"]}_{config["system"]["i_seed"]}.json'
     )
     with open(clustering_file, 'w') as f:
         json.dump(clustering_results, f, indent=2)
