@@ -172,72 +172,94 @@ def fed_run():
     print(f"\n聚类结果已保存到: {clustering_file}")
 
     # 继续原有的联邦学习训练循环
-    print("\n开始联邦学习训练...")
+    print("\n开始簇内联邦学习训练...")
 
+    # 为每个簇创建一个独立的服务器和记录器
+    cluster_servers = {}
+    cluster_recorders = {}
+    cluster_max_acc = {}
+    
+    for cluster_id in clusters.keys():
+        # 为每个簇创建服务器
+        cluster_servers[cluster_id] = FedServer(
+            clusters[cluster_id],  # 该簇的客户端列表
+            dataset_id=config["system"]["dataset"],
+            model_name=config["system"]["model"]
+        )
+        # 加载测试集
+        cluster_servers[cluster_id].load_testset(testset)
+        # 创建记录器
+        cluster_recorders[cluster_id] = Recorder()
+        cluster_max_acc[cluster_id] = 0
+
+    # 并行训练每个簇
     pbar = tqdm(range(config["system"]["num_round"]))
     for global_round in pbar:
-        # 每个节点进行本地训练
-        for client_id in trainset_config['users']:
-            # 更新使用全局模型
-            client_dict[client_id].update(global_state_dict)
-            # 本地训练得到模型参数、数据量和loss
-            state_dict, n_data, loss = client_dict[client_id].train()
-            fed_server.rec(client_dict[client_id].name, state_dict, n_data, loss)
-
-        # 服务器聚合模型
-        fed_server.select_clients()
-        gglobal_state_dict, avg_loss, _ = fed_server.agg()
-
-        # 测试&flush
-        accuracy = fed_server.test()
-        fed_server.flush()
-
-        # 记录结果
-        recorder.res['server']['iid_accuracy'].append(accuracy)
-        recorder.res['server']['train_loss'].append(avg_loss)
+        cluster_metrics = {}
         
-        # 更新最大准确率
-        if max_acc < accuracy:
-            max_acc = accuracy
-        pbar.set_description(
-            'Global Round: %d' % global_round +
-            '| Train loss: %.4f ' % avg_loss +
-            '| Accuracy: %.4f' % accuracy +
-            '| Max Acc: %.4f' % max_acc)
+        # 对每个簇进行训练
+        for cluster_id, members in clusters.items():
+            # 获取该簇的服务器和记录器
+            cluster_server = cluster_servers[cluster_id]
+            cluster_recorder = cluster_recorders[cluster_id]
+            
+            # 簇内每个节点进行本地训练
+            for client_id in members:
+                # 获取簇内服务器的全局模型
+                cluster_global_state = cluster_server.state_dict()
+                # 更新使用簇内全局模型
+                client_dict[client_id].update(cluster_global_state)
+                # 本地训练得到模型参数、数据量和loss
+                state_dict, n_data, loss = client_dict[client_id].train()
+                cluster_server.rec(client_id, state_dict, n_data, loss)
+
+            # 簇内服务器聚合模型
+            cluster_server.select_clients()
+            cluster_global_state, avg_loss, _ = cluster_server.agg()
+
+            # 簇内测试和记录
+            accuracy = cluster_server.test()
+            cluster_server.flush()
+
+            # 记录簇内结果
+            cluster_recorder.res['server']['iid_accuracy'].append(accuracy)
+            cluster_recorder.res['server']['train_loss'].append(avg_loss)
+            
+            # 更新簇内最大准确率
+            if cluster_max_acc[cluster_id] < accuracy:
+                cluster_max_acc[cluster_id] = accuracy
+            
+            # 保存簇的指标用于显示
+            cluster_metrics[cluster_id] = {
+                'loss': avg_loss,
+                'accuracy': accuracy,
+                'max_acc': cluster_max_acc[cluster_id]
+            }
+
+        # 更新进度条显示所有簇的指标
+        display_str = f'Global Round: {global_round}'
+        for cluster_id, metrics in cluster_metrics.items():
+            display_str += f' | Cluster {cluster_id} - '
+            display_str += f'Loss: {metrics["loss"]:.4f} '
+            display_str += f'Acc: {metrics["accuracy"]:.4f} '
+            display_str += f'Max: {metrics["max_acc"]:.4f}'
+        pbar.set_description(display_str)
         
-        # 保存结果到设置中编写的文件夹下
+        # 保存每个簇的结果
         if not os.path.exists(config["system"]["res_root"]):
             os.makedirs(config["system"]["res_root"])
 
-        with open(os.path.join(config["system"]["res_root"], '[\'%s\',' % config["client"]["fed_algo"] +
-                                '\'%s\',' % config["system"]["model"] +
-                                str(config["client"]["num_local_epoch"]) + ',' +
-                                str(config["system"]["num_local_class"]) + ',' +
-                                str(config["system"]["i_seed"])) + ']', "w") as jsfile:
-            json.dump(recorder.res, jsfile, cls=PythonObjectEncoder)
-
-    # 在初始训练后添加：
-    # clustering_results = compare_clustering_methods(
-    #     client_models, 
-    #     client_ids, 
-    #     n_clusters=3
-    # )
-
-    # # 保存结果
-    # clustering_file = os.path.join(
-    #     config["system"]["res_root"],
-    #     f'clustering_comparison_{config["system"]["dataset"]}_{config["system"]["num_client"]}.json'
-    # )
-    # with open(clustering_file, 'w') as f:
-    #     json.dump({
-    #         'methods': {
-    #             method: {
-    #                 'similarity_matrix': results['similarity_matrix'].tolist(),
-    #                 'cluster_labels': results['cluster_labels'].tolist()
-    #             }
-    #             for method, results in clustering_results.items()
-    #         },
-    #     }, f, indent=2)
+        for cluster_id, recorder in cluster_recorders.items():
+            result_filename = os.path.join(
+                config["system"]["res_root"], 
+                f'[\'cluster_{cluster_id}_{config["client"]["fed_algo"]}\','
+                f'\'cluster_{cluster_id}_{config["system"]["model"]}\',' 
+                f'{config["client"]["num_local_epoch"]},'
+                f'{config["system"]["num_local_class"]},'
+                f'{config["system"]["i_seed"]}]'
+            )
+            with open(result_filename, "w") as jsfile:
+                json.dump(recorder.res, jsfile, cls=PythonObjectEncoder)
 
 class SimilarityCalculator(ABC):
     """相似度计算的抽象基类"""
