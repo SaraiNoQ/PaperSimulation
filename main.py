@@ -266,10 +266,6 @@ def fed_run():
         if top_level_max_acc < global_accuracy:
             top_level_max_acc = global_accuracy
         
-        # 3. 将全局模型分发给各个簇
-        # for cluster_id in clusters.keys():
-        #     cluster_servers[cluster_id].update(global_state_dict)
-
         # 更新进度条显示所有指标
         display_str = f'Global Round: {global_round}'
         for cluster_id, metrics in cluster_metrics.items():

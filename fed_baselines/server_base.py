@@ -155,11 +155,3 @@ class FedServer(object):
         self.client_state = {}
         self.client_n_data = {}
         self.client_loss = {}
-
-    def update(self, model_state_dict):
-        """
-        Update server's model with new state dictionary.
-        :param model_state_dict: New model state dictionary to update with
-        """
-        self.model = init_model(model_name=self.model_name, num_class=self._num_class, image_channel=self._image_channel)
-        self.model.load_state_dict(model_state_dict)
