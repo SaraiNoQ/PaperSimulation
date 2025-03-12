@@ -267,8 +267,8 @@ def fed_run():
             top_level_max_acc = global_accuracy
         
         # 3. 将全局模型分发给各个簇
-        for cluster_id in clusters.keys():
-            cluster_servers[cluster_id].update(global_state_dict)
+        # for cluster_id in clusters.keys():
+        #     cluster_servers[cluster_id].update(global_state_dict)
 
         # 更新进度条显示所有指标
         display_str = f'Global Round: {global_round}'
@@ -508,7 +508,7 @@ def visualize_clustering_results(similarity_matrix, cluster_labels, n_clusters, 
     
     plt.subplot(121)
     scatter = plt.scatter(similarity_2d[:, 0], similarity_2d[:, 1], 
-                         c=cluster_labels, cmap='tab10', label=f'Coarse cluster {n_clusters}')
+                         c=cluster_labels, cmap='tab10')
     plt.colorbar(scatter)
     plt.title(f"Client clustering results ({method_name})")
     plt.xlabel("1st principal component")
