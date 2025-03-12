@@ -460,7 +460,7 @@ def visualize_clustering_results(similarity_matrix, cluster_labels, n_clusters, 
     
     plt.subplot(121)
     scatter = plt.scatter(similarity_2d[:, 0], similarity_2d[:, 1], 
-                         c=cluster_labels, cmap='tab10')
+                         c=cluster_labels, cmap='tab10', label=f'Coarse cluster {n_clusters}')
     plt.colorbar(scatter)
     plt.title(f"Client clustering results ({method_name})")
     plt.xlabel("1st principal component")
