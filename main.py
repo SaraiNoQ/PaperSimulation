@@ -72,15 +72,15 @@ def fed_run():
     recorder = Recorder()
 
     # trainset_config {'users': ['user_id1', ...], 'user_data': {'user_id1': train_data, ...}, 'num_samples': number}
-    trainset_config, testset = divide_data(num_client=config["system"]["num_client"], 
-                                        num_local_class=config["system"]["num_local_class"], 
-                                        dataset_name=config["system"]["dataset"],
-                                        i_seed=config["system"]["i_seed"])
-    
-    # trainset_config, testset = divide_noniid_data(num_client=config["system"]["num_client"], 
-    #                                     imbalance_factor=0.3, 
+    # trainset_config, testset = divide_data(num_client=config["system"]["num_client"], 
+    #                                     num_local_class=config["system"]["num_local_class"], 
     #                                     dataset_name=config["system"]["dataset"],
     #                                     i_seed=config["system"]["i_seed"])
+    
+    trainset_config, testset = divide_noniid_data(num_client=config["system"]["num_client"], 
+                                        imbalance_factor=config["system"]["imbalance_factor"], 
+                                        dataset_name=config["system"]["dataset"],
+                                        i_seed=config["system"]["i_seed"])
     
     max_acc = 0
 
@@ -117,14 +117,16 @@ def fed_run():
     client_ids = list(trainset_config['users'])
     
     print("计算模型相似度矩阵...")
-    # js_calculator = JSDistanceSimilarity(n_clients, client_models, client_ids)
-    # similarity_matrix = js_calculator.compute_similarity_matrix()
 
-    # pearson_calculator = PearsonSimilarity(n_clients, client_models, client_ids)
-    # similarity_matrix = pearson_calculator.compute_similarity_matrix()
-
-    wasserstein_calculator = WassersteinSimilarity(n_clients, client_models, client_ids)
-    similarity_matrix = wasserstein_calculator.compute_similarity_matrix()
+    if (config["system"]["similarity_method"] == "wasserstein"):
+        wasserstein_calculator = WassersteinSimilarity(n_clients, client_models, client_ids)
+        similarity_matrix = wasserstein_calculator.compute_similarity_matrix()
+    elif (config["system"]["similarity_method"] == "pearson"):
+        pearson_calculator = PearsonSimilarity(n_clients, client_models, client_ids)
+        similarity_matrix = pearson_calculator.compute_similarity_matrix()
+    elif (config["system"]["similarity_method"] == "js"):
+        js_calculator = JSDistanceSimilarity(n_clients, client_models, client_ids)
+        similarity_matrix = js_calculator.compute_similarity_matrix()
 
     # 3. 执行谱聚类
     n_clusters = 3  # 可以根据需要调整

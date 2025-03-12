@@ -6,6 +6,8 @@ system:
   i_seed: 235235
   num_round: 100
   res_root: "results"
+  imbalance_factor: 0.6
+  similarity_method: "wasserstein"
 
 client:
   fed_algo: "FedAvg"
