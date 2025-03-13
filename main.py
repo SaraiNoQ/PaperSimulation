@@ -78,6 +78,51 @@ def train_cluster(args):
         'n_members': len(members)
     }
 
+def train_clusters_sequential(clusters, client_dict, cluster_servers, cluster_recorders):
+    """
+    顺序训练所有簇
+    """
+    cluster_results = []
+    for cluster_id, members in clusters.items():
+        try:
+            result = train_cluster((cluster_id, members, client_dict, 
+                                  cluster_servers[cluster_id], 
+                                  cluster_recorders[cluster_id]))
+            cluster_results.append(result)
+        except Exception as e:
+            print(f"Cluster {cluster_id} training failed: {str(e)}")
+    return cluster_results
+
+def train_clusters_concurrent(clusters, client_dict, cluster_servers, cluster_recorders, num_threads):
+    """
+    并发训练所有簇
+    """
+    cluster_results = []
+    with ThreadPoolExecutor(max_workers=num_threads) as executor:
+        # 准备每个簇的训练参数
+        cluster_args = [
+            (cluster_id, members, client_dict, cluster_servers[cluster_id], 
+             cluster_recorders[cluster_id])
+            for cluster_id, members in clusters.items()
+        ]
+        
+        # 并行执行簇内训练
+        future_to_cluster = {
+            executor.submit(train_cluster, args): args[0]
+            for args in cluster_args
+        }
+        
+        # 收集训练结果
+        for future in concurrent.futures.as_completed(future_to_cluster):
+            try:
+                result = future.result()
+                cluster_results.append(result)
+            except Exception as e:
+                cluster_id = future_to_cluster[future]
+                print(f"Cluster {cluster_id} training failed: {str(e)}")
+    
+    return cluster_results
+
 def fed_run():
     args = fed_args()
     with open(args.config, "r") as yaml_file:
@@ -234,38 +279,25 @@ def fed_run():
         cluster_recorders[cluster_id] = Recorder()
         cluster_max_acc[cluster_id] = 0
 
-    # 创建线程池
-    num_threads = len(clusters)  # 每个簇一个线程
-    executor = ThreadPoolExecutor(max_workers=num_threads)
-    
     # 并行训练每个簇
     pbar = tqdm(range(config["system"]["num_round"]))
     for global_round in pbar:
         cluster_metrics = {}
         
-        # 1. 准备每个簇的训练参数
-        cluster_args = [
-            (cluster_id, members, client_dict, cluster_servers[cluster_id], cluster_recorders[cluster_id])
-            for cluster_id, members in clusters.items()
-        ]
+        # 根据配置决定使用顺序训练还是并发训练
+        if config["system"]["concurrent"]:
+            num_threads = len(clusters)  # 每个簇一个线程
+            cluster_results = train_clusters_concurrent(
+                clusters, client_dict, cluster_servers, 
+                cluster_recorders, num_threads
+            )
+        else:
+            cluster_results = train_clusters_sequential(
+                clusters, client_dict, cluster_servers, 
+                cluster_recorders
+            )
         
-        # 2. 并行执行簇内训练
-        future_to_cluster = {
-            executor.submit(train_cluster, args): args[0]  # args[0] 是 cluster_id
-            for args in cluster_args
-        }
-        
-        # 3. 收集训练结果
-        cluster_results = []
-        for future in concurrent.futures.as_completed(future_to_cluster):
-            try:
-                result = future.result()
-                cluster_results.append(result)
-            except Exception as e:
-                cluster_id = future_to_cluster[future]
-                print(f"Cluster {cluster_id} training failed: {str(e)}")
-        
-        # 4. 处理训练结果
+        # 处理训练结果
         for result in cluster_results:
             cluster_id = result['cluster_id']
             
@@ -288,15 +320,15 @@ def fed_run():
                 result['avg_loss']
             )
         
-        # 5. 簇间聚合
+        # 簇间聚合
         top_level_server.select_clients()
         global_state_dict, global_avg_loss, _ = top_level_server.agg()
         
-        # 6. 更新每个簇的全局模型
+        # 更新每个簇的全局模型
         for cluster_id in clusters.keys():
             cluster_servers[cluster_id].update(global_state_dict)
         
-        # 7. 测试全局模型性能
+        # 测试全局模型性能
         global_accuracy = top_level_server.test()
         top_level_server.flush()
         
@@ -346,9 +378,6 @@ def fed_run():
         )
         with open(global_result_filename, "w") as jsfile:
             json.dump(top_level_recorder.res, jsfile, cls=PythonObjectEncoder)
-
-    # 关闭线程池
-    executor.shutdown()
 
 if __name__ == "__main__":
     fed_run()

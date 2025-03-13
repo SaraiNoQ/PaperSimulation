@@ -1,5 +1,5 @@
 system:
-  num_client: 50
+  num_client: 10
   num_local_class: 2
   dataset: "MNIST"
   model: "LeNet"
@@ -9,11 +9,12 @@ system:
   noniid: true
   imbalance_factor: 0.6
   similarity_method: "wasserstein"
+  concurrent: false
 
 client:
   fed_algo: "FedAvg"
   lr: 0.01
   batch_size: 64
-  num_local_epoch: 5
+  num_local_epoch: 3
   momentum: 0.9
   num_worker: 2
