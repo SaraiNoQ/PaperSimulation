@@ -1,5 +1,5 @@
 system:
-  num_client: 150
+  num_client: 50
   num_local_class: 2
   dataset: "MNIST"
   model: "LeNet"

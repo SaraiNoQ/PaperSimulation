@@ -6,18 +6,15 @@ import pickle
 import argparse
 import yaml
 from json import JSONEncoder
-from abc import ABC, abstractmethod
-from scipy.stats import pearsonr
-from scipy.stats import wasserstein_distance
-
-from matplotlib import pyplot as plt
-from sklearn.cluster import SpectralClustering
-from sklearn.decomposition import PCA
 from tqdm import tqdm
 
 import numpy as np
 import torch
 import time
+import threading
+import concurrent.futures
+from concurrent.futures import ThreadPoolExecutor
+from queue import Queue
 
 from fed_baselines.client_base import FedClient
 from fed_baselines.server_base import FedServer
@@ -46,6 +43,42 @@ def fed_args():
 
     args = parser.parse_args()
     return args
+
+def train_cluster(args):
+    """
+    单个簇的训练函数
+    """
+    cluster_id, members, client_dict, cluster_server, cluster_recorder = args
+    
+    # 簇内每个节点进行本地训练
+    for client_id in members:
+        # 获取簇内服务器的全局模型
+        cluster_global_state = cluster_server.state_dict()
+        # 更新使用簇内全局模型
+        client_dict[client_id].update(cluster_global_state)
+        # 本地训练得到模型参数、数据量和loss
+        state_dict, n_data, loss = client_dict[client_id].train()
+        cluster_server.rec(client_id, state_dict, n_data, loss)
+
+    # 簇内服务器聚合模型
+    cluster_server.select_clients()
+    cluster_global_state, avg_loss, _ = cluster_server.agg()
+
+    # 簇内测试和记录
+    accuracy = cluster_server.test()
+    cluster_server.flush()
+
+    # 记录簇内结果
+    cluster_recorder.res['server']['iid_accuracy'].append(accuracy)
+    cluster_recorder.res['server']['train_loss'].append(avg_loss)
+    
+    return {
+        'cluster_id': cluster_id,
+        'global_state': cluster_global_state,
+        'avg_loss': avg_loss,
+        'accuracy': accuracy,
+        'n_members': len(members)
+    }
 
 def fed_run():
     args = fed_args()
@@ -203,64 +236,69 @@ def fed_run():
         cluster_recorders[cluster_id] = Recorder()
         cluster_max_acc[cluster_id] = 0
 
+    # 创建线程池
+    num_threads = len(clusters)  # 每个簇一个线程
+    executor = ThreadPoolExecutor(max_workers=num_threads)
+    
     # 并行训练每个簇
     pbar = tqdm(range(config["system"]["num_round"]))
     for global_round in pbar:
         cluster_metrics = {}
         
-        # 1. 簇内训练和聚合
-        for cluster_id, members in clusters.items():
-            # 获取该簇的服务器和记录器
-            cluster_server = cluster_servers[cluster_id]
-            cluster_recorder = cluster_recorders[cluster_id]
+        # 1. 准备每个簇的训练参数
+        cluster_args = [
+            (cluster_id, members, client_dict, cluster_servers[cluster_id], cluster_recorders[cluster_id])
+            for cluster_id, members in clusters.items()
+        ]
+        
+        # 2. 并行执行簇内训练
+        future_to_cluster = {
+            executor.submit(train_cluster, args): args[0]  # args[0] 是 cluster_id
+            for args in cluster_args
+        }
+        
+        # 3. 收集训练结果
+        cluster_results = []
+        for future in concurrent.futures.as_completed(future_to_cluster):
+            try:
+                result = future.result()
+                cluster_results.append(result)
+            except Exception as e:
+                cluster_id = future_to_cluster[future]
+                print(f"Cluster {cluster_id} training failed: {str(e)}")
+        
+        # 4. 处理训练结果
+        for result in cluster_results:
+            cluster_id = result['cluster_id']
             
-            # 簇内每个节点进行本地训练
-            for client_id in members:
-                # 获取簇内服务器的全局模型
-                cluster_global_state = cluster_server.state_dict()
-                # 更新使用簇内全局模型
-                client_dict[client_id].update(cluster_global_state)
-                # 本地训练得到模型参数、数据量和loss
-                state_dict, n_data, loss = client_dict[client_id].train()
-                cluster_server.rec(client_id, state_dict, n_data, loss)
-
-            # 簇内服务器聚合模型
-            cluster_server.select_clients()
-            cluster_global_state, avg_loss, _ = cluster_server.agg()
-
-            # 簇内测试和记录
-            accuracy = cluster_server.test()
-            cluster_server.flush()
-
-            # 记录簇内结果
-            cluster_recorder.res['server']['iid_accuracy'].append(accuracy)
-            cluster_recorder.res['server']['train_loss'].append(avg_loss)
-            
-            # 更新簇内最大准确率
-            if cluster_max_acc[cluster_id] < accuracy:
-                cluster_max_acc[cluster_id] = accuracy
+            # 更新簇的最大准确率
+            if cluster_max_acc[cluster_id] < result['accuracy']:
+                cluster_max_acc[cluster_id] = result['accuracy']
             
             # 保存簇的指标用于显示
             cluster_metrics[cluster_id] = {
-                'loss': avg_loss,
-                'accuracy': accuracy,
+                'loss': result['avg_loss'],
+                'accuracy': result['accuracy'],
                 'max_acc': cluster_max_acc[cluster_id]
             }
             
             # 将簇的全局模型提交给顶层服务器
-            # 使用簇内客户端数量作为权重
-            top_level_server.rec(cluster_id, cluster_global_state, len(members), avg_loss)
+            top_level_server.rec(
+                cluster_id,
+                result['global_state'],
+                result['n_members'],
+                result['avg_loss']
+            )
         
-        # 2. 簇间聚合
+        # 5. 簇间聚合
         top_level_server.select_clients()
         global_state_dict, global_avg_loss, _ = top_level_server.agg()
         
-        # 更新每个簇的全局模型
-        for cluster_id, members in clusters.items():
-            cluster_server = cluster_servers[cluster_id]
-            cluster_server.update(global_state_dict)
+        # 6. 更新每个簇的全局模型
+        for cluster_id in clusters.keys():
+            cluster_servers[cluster_id].update(global_state_dict)
         
-        # 测试全局模型性能
+        # 7. 测试全局模型性能
         global_accuracy = top_level_server.test()
         top_level_server.flush()
         
@@ -268,7 +306,7 @@ def fed_run():
         top_level_recorder.res['server']['iid_accuracy'].append(global_accuracy)
         top_level_recorder.res['server']['train_loss'].append(global_avg_loss)
         
-        # # 更新全局最大准确率
+        # 更新全局最大准确率
         if top_level_max_acc < global_accuracy:
             top_level_max_acc = global_accuracy
         
@@ -310,6 +348,9 @@ def fed_run():
         )
         with open(global_result_filename, "w") as jsfile:
             json.dump(top_level_recorder.res, jsfile, cls=PythonObjectEncoder)
+
+    # 关闭线程池
+    executor.shutdown()
 
 if __name__ == "__main__":
     fed_run()
