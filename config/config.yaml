@@ -6,8 +6,8 @@ system:
   i_seed: 235235
   num_round: 200
   res_root: "results"
-  noniid: false
-  imbalance_factor: 0.3
+  noniid: true
+  imbalance_factor: 0.6
   similarity_method: "wasserstein"
 
 client:

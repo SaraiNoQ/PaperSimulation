@@ -155,3 +155,10 @@ class FedServer(object):
         self.client_state = {}
         self.client_n_data = {}
         self.client_loss = {}
+
+    def update(self, model_state_dict):
+        """
+        Server updates the global model from the client
+        :param model_state_dict: Model dict from the client
+        """
+        self.model.load_state_dict(model_state_dict)

@@ -255,6 +255,11 @@ def fed_run():
         top_level_server.select_clients()
         global_state_dict, global_avg_loss, _ = top_level_server.agg()
         
+        # 更新每个簇的全局模型
+        for cluster_id, members in clusters.items():
+            cluster_server = cluster_servers[cluster_id]
+            cluster_server.update(global_state_dict)
+        
         # 测试全局模型性能
         global_accuracy = top_level_server.test()
         top_level_server.flush()
