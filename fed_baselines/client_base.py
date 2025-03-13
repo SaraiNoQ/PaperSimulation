@@ -20,9 +20,9 @@ class FedClient(object):
 
         # Initialize the parameters in the local client
         self._epoch = epoch
-        self._batch_size = 32
+        self._batch_size = 50
         self._lr = 0.01
-        self._momentum = 0.95
+        self._momentum = 0.9
         self.num_workers = 2
         self.loss_rec = []
         self.n_data = 0
@@ -76,7 +76,7 @@ class FedClient(object):
             lr=initial_lr,
             betas=(0.9, 0.999),
             eps=1e-8,
-            weight_decay=0.01
+            weight_decay=0.02
         )
         
         # 设置学习率调度器
