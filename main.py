@@ -251,20 +251,20 @@ def fed_run():
             top_level_server.rec(cluster_id, cluster_global_state, len(members), avg_loss)
         
         # 2. 簇间聚合
-        top_level_server.select_clients()
-        global_state_dict, global_avg_loss, _ = top_level_server.agg()
+        # top_level_server.select_clients()
+        # global_state_dict, global_avg_loss, _ = top_level_server.agg()
         
         # 测试全局模型性能
-        global_accuracy = top_level_server.test()
-        top_level_server.flush()
+        # global_accuracy = top_level_server.test()
+        # top_level_server.flush()
         
         # 记录全局结果
-        top_level_recorder.res['server']['iid_accuracy'].append(global_accuracy)
-        top_level_recorder.res['server']['train_loss'].append(global_avg_loss)
+        # top_level_recorder.res['server']['iid_accuracy'].append(global_accuracy)
+        # top_level_recorder.res['server']['train_loss'].append(global_avg_loss)
         
-        # 更新全局最大准确率
-        if top_level_max_acc < global_accuracy:
-            top_level_max_acc = global_accuracy
+        # # 更新全局最大准确率
+        # if top_level_max_acc < global_accuracy:
+        #     top_level_max_acc = global_accuracy
         
         # 更新进度条显示所有指标
         display_str = f'Global Round: {global_round}'
@@ -273,7 +273,7 @@ def fed_run():
             display_str += f'Loss: {metrics["loss"]:.4f} '
             display_str += f'Acc: {metrics["accuracy"]:.4f} '
             display_str += f'Max: {metrics["max_acc"]:.4f}'
-        display_str += f' | Global - Loss: {global_avg_loss:.4f} Acc: {global_accuracy:.4f} Max: {top_level_max_acc:.4f}'
+        # display_str += f' | Global - Loss: {global_avg_loss:.4f} Acc: {global_accuracy:.4f} Max: {top_level_max_acc:.4f}'
         pbar.set_description(display_str)
         
         # 保存结果
@@ -294,16 +294,16 @@ def fed_run():
                 json.dump(recorder.res, jsfile, cls=PythonObjectEncoder)
         
         # 保存全局结果
-        global_result_filename = os.path.join(
-            config["system"]["res_root"], 
-            f'[\'global_{config["client"]["fed_algo"]}\','
-            f'\'global_{config["system"]["model"]}\',' 
-            f'{config["client"]["num_local_epoch"]},'
-            f'{config["system"]["num_local_class"]},'
-            f'{config["system"]["i_seed"]}]'
-        )
-        with open(global_result_filename, "w") as jsfile:
-            json.dump(top_level_recorder.res, jsfile, cls=PythonObjectEncoder)
+        # global_result_filename = os.path.join(
+        #     config["system"]["res_root"], 
+        #     f'[\'global_{config["client"]["fed_algo"]}\','
+        #     f'\'global_{config["system"]["model"]}\',' 
+        #     f'{config["client"]["num_local_epoch"]},'
+        #     f'{config["system"]["num_local_class"]},'
+        #     f'{config["system"]["i_seed"]}]'
+        # )
+        # with open(global_result_filename, "w") as jsfile:
+        #     json.dump(top_level_recorder.res, jsfile, cls=PythonObjectEncoder)
 
 class SimilarityCalculator(ABC):
     """相似度计算的抽象基类"""
