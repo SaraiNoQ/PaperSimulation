@@ -22,6 +22,9 @@ from postprocessing.recorder import Recorder
 from preprocessing.baselines_dataloader import divide_data, divide_noniid_data
 from utils.similarity_cal import WassersteinSimilarity, PearsonSimilarity, JSDistanceSimilarity, perform_spectral_clustering, visualize_clustering_results
 
+from typing import Dict, Any
+from blockchain.block_structure import BlockChain, ClientInfo
+
 # 用于将python对象序列化为json对象
 json_types = (list, dict, str, int, float, bool, type(None))
 class PythonObjectEncoder(JSONEncoder):
@@ -42,58 +45,174 @@ def fed_args():
     args = parser.parse_args()
     return args
 
+def calculate_reputation(client_id: str, old_model_params: Dict[str, torch.Tensor], 
+                       new_model_params: Dict[str, torch.Tensor], 
+                       cluster_accuracy: float) -> float:
+    """计算客户端信誉值"""
+    # 确保所有张量在同一设备上
+    device = next(iter(old_model_params.values())).device
+    
+    # 计算模型更新的欧氏距离
+    distance = 0
+    for key in old_model_params:
+        if key in new_model_params:
+            # 确保两个张量在同一设备上
+            old_param = old_model_params[key].to(device)
+            new_param = new_model_params[key].to(device)
+            diff = old_param - new_param
+            distance += torch.norm(diff).item()
+    
+    # 归一化距离到[0,1]区间
+    normalized_distance = 1.0 / (1.0 + distance)
+    
+    # 将准确率和距离结合计算信誉值
+    reputation = float(0.7 * cluster_accuracy + 0.3 * normalized_distance)
+    return reputation
+
+def serialize_model_params(model_params: Dict[str, torch.Tensor]) -> Dict[str, Any]:
+    """序列化模型参数"""
+    serialized_params = {}
+    for key, value in model_params.items():
+        # 将张量移动到CPU并转换为列表
+        if isinstance(value, torch.Tensor):
+            serialized_params[key] = value.cpu().detach().numpy().tolist()
+        else:
+            serialized_params[key] = value
+    return serialized_params
+
 def train_cluster(args):
     """
     单个簇的训练函数
     """
-    cluster_id, members, client_dict, cluster_server, cluster_recorder = args
+    cluster_id, members, client_dict, cluster_server, cluster_recorder, blockchain = args
     
-    # 簇内每个节点进行本地训练
-    for client_id in members:
-        # 获取簇内服务器的全局模型
-        cluster_global_state = cluster_server.state_dict()
-        # 更新使用簇内全局模型
-        client_dict[client_id].update(cluster_global_state)
-        # 本地训练得到模型参数、数据量和loss
-        state_dict, n_data, loss = client_dict[client_id].train()
-        cluster_server.rec(client_id, state_dict, n_data, loss)
+    try:
+        # 获取设备信息
+        device = next(iter(cluster_server.state_dict().values())).device
+        
+        # 将服务器模型移动到GPU
+        cluster_server.model = cluster_server.model.to(device)
+        
+        # 获取簇内服务器的全局模型参数（训练前）
+        old_model_params = {k: v.clone().to(device) for k, v in cluster_server.state_dict().items()}
+        
+        # 簇内每个节点进行本地训练
+        client_states = {}
+        for client_id in members:
+            try:
+                # 获取簇内服务器的全局模型
+                cluster_global_state = cluster_server.state_dict()
+                
+                # 确保客户端模型在GPU上
+                client_dict[client_id].model = client_dict[client_id].model.to(device)
+                
+                # 更新使用簇内全局模型
+                client_dict[client_id].update(cluster_global_state)
+                
+                # 本地训练得到模型参数、数据量和loss
+                state_dict, n_data, loss = client_dict[client_id].train()
+                
+                # 确保状态字典中的所有张量都在正确的设备上
+                state_dict = {k: v.to(device) for k, v in state_dict.items()}
+                client_states[client_id] = (state_dict, int(n_data), float(loss))
+                cluster_server.rec(client_id, state_dict, n_data, loss)
+                
+                # 将客户端模型移回CPU并清理内存
+                client_dict[client_id].model = client_dict[client_id].model.cpu()
+                if hasattr(client_dict[client_id], 'optimizer'):
+                    client_dict[client_id].optimizer = None
+                torch.cuda.empty_cache()
+                
+            except Exception as e:
+                print(f"Error training client {client_id} in cluster {cluster_id}: {str(e)}")
+                continue
 
-    # 簇内服务器聚合模型
-    cluster_server.select_clients()
-    cluster_global_state, avg_loss, _ = cluster_server.agg()
+        # 簇内服务器聚合模型
+        cluster_server.select_clients()
+        cluster_global_state, avg_loss, _ = cluster_server.agg()
 
-    # 簇内测试和记录
-    accuracy = cluster_server.test()
-    cluster_server.flush()
+        # 簇内测试和记录
+        accuracy = cluster_server.test()
+        cluster_server.flush()
 
-    # 记录簇内结果
-    cluster_recorder.res['server']['iid_accuracy'].append(accuracy)
-    cluster_recorder.res['server']['train_loss'].append(avg_loss)
-    
-    return {
-        'cluster_id': cluster_id,
-        'global_state': cluster_global_state,
-        'avg_loss': avg_loss,
-        'accuracy': accuracy,
-        'n_members': len(members)
-    }
+        # 计算每个客户端的信誉值并创建ClientInfo对象
+        clients_info = []
+        for client_id in members:
+            if client_id in client_states:
+                reputation = calculate_reputation(
+                    client_id, 
+                    old_model_params,
+                    client_states[client_id][0],
+                    accuracy
+                )
+                clients_info.append(ClientInfo(client_id, float(reputation)))
 
-def train_clusters_sequential(clusters, client_dict, cluster_servers, cluster_recorders):
+        # 创建子区块
+        # 确保模型参数在CPU上并转换为可序列化格式
+        serializable_params = serialize_model_params(cluster_global_state)
+        try:
+            sub_block = blockchain.create_sub_block(
+                cluster_id=int(cluster_id),
+                round_num=len(cluster_recorder.res['server']['iid_accuracy']),
+                model_params=serializable_params,
+                clients_info=clients_info
+            )
+            print('子区块创建完成')
+        except Exception as e:
+            print(f"创建子区块时出错: {str(e)}")
+            raise e
+
+        # 记录簇内结果
+        cluster_recorder.res['server']['iid_accuracy'].append(float(accuracy))
+        cluster_recorder.res['server']['train_loss'].append(float(avg_loss))
+        
+        # 将服务器模型移回CPU并清理内存
+        cluster_server.model = cluster_server.model.cpu()
+        torch.cuda.empty_cache()
+        
+        return {
+            'cluster_id': int(cluster_id),
+            'global_state': cluster_global_state,
+            'avg_loss': float(avg_loss),
+            'accuracy': float(accuracy),
+            'n_members': int(len(members)),
+            'sub_block': sub_block
+        }
+        
+    except Exception as e:
+        print(f"Error in cluster {cluster_id} training: {str(e)}")
+        # 确保发生错误时也清理GPU内存
+        if hasattr(cluster_server, 'model'):
+            cluster_server.model = cluster_server.model.cpu()
+        torch.cuda.empty_cache()
+        raise e
+
+def train_clusters_sequential(clusters, client_dict, cluster_servers, cluster_recorders, blockchain):
     """
     顺序训练所有簇
     """
     cluster_results = []
     for cluster_id, members in clusters.items():
         try:
+            # 在每个簇开始训练前清理GPU内存
+            torch.cuda.empty_cache()
+            
             result = train_cluster((cluster_id, members, client_dict, 
                                   cluster_servers[cluster_id], 
-                                  cluster_recorders[cluster_id]))
+                                  cluster_recorders[cluster_id],
+                                  blockchain))
             cluster_results.append(result)
+            
+            # 在每个簇训练后清理GPU内存
+            torch.cuda.empty_cache()
+            
         except Exception as e:
             print(f"Cluster {cluster_id} training failed: {str(e)}")
+            # 确保发生错误时也清理GPU内存
+            torch.cuda.empty_cache()
     return cluster_results
 
-def train_clusters_concurrent(clusters, client_dict, cluster_servers, cluster_recorders, num_threads):
+def train_clusters_concurrent(clusters, client_dict, cluster_servers, cluster_recorders, blockchain, num_threads):
     """
     并发训练所有簇
     """
@@ -102,7 +221,7 @@ def train_clusters_concurrent(clusters, client_dict, cluster_servers, cluster_re
         # 准备每个簇的训练参数
         cluster_args = [
             (cluster_id, members, client_dict, cluster_servers[cluster_id], 
-             cluster_recorders[cluster_id])
+             cluster_recorders[cluster_id], blockchain)
             for cluster_id, members in clusters.items()
         ]
         
@@ -279,6 +398,9 @@ def fed_run():
         cluster_recorders[cluster_id] = Recorder()
         cluster_max_acc[cluster_id] = 0
 
+    # 初始化区块链
+    blockchain = BlockChain(difficulty=4)  # 设置挖矿难度
+
     # 并行训练每个簇
     pbar = tqdm(range(config["system"]["num_round"]))
     for global_round in pbar:
@@ -289,12 +411,12 @@ def fed_run():
             num_threads = len(clusters)  # 每个簇一个线程
             cluster_results = train_clusters_concurrent(
                 clusters, client_dict, cluster_servers, 
-                cluster_recorders, num_threads
+                cluster_recorders, blockchain, num_threads
             )
         else:
             cluster_results = train_clusters_sequential(
                 clusters, client_dict, cluster_servers, 
-                cluster_recorders
+                cluster_recorders, blockchain
             )
         
         # 处理训练结果
@@ -324,6 +446,20 @@ def fed_run():
         top_level_server.select_clients()
         global_state_dict, global_avg_loss, _ = top_level_server.agg()
         
+        # 创建主区块
+        # 序列化全局模型参数
+        serializable_global_params = serialize_model_params(global_state_dict)
+        print('开始创建主区块...')
+        try:
+            main_block = blockchain.create_main_block(
+                round_num=global_round,
+                global_model_params=serializable_global_params
+            )
+            print('主区块创建完成')
+        except Exception as e:
+            print(f"创建主区块时出错: {str(e)}")
+            raise e
+        
         # 更新每个簇的全局模型
         for cluster_id in clusters.keys():
             cluster_servers[cluster_id].update(global_state_dict)
@@ -333,8 +469,8 @@ def fed_run():
         top_level_server.flush()
         
         # 记录全局结果
-        top_level_recorder.res['server']['iid_accuracy'].append(global_accuracy)
-        top_level_recorder.res['server']['train_loss'].append(global_avg_loss)
+        top_level_recorder.res['server']['iid_accuracy'].append(float(global_accuracy))
+        top_level_recorder.res['server']['train_loss'].append(float(global_avg_loss))
         
         # 更新全局最大准确率
         if top_level_max_acc < global_accuracy:
@@ -378,6 +514,20 @@ def fed_run():
         )
         with open(global_result_filename, "w") as jsfile:
             json.dump(top_level_recorder.res, jsfile, cls=PythonObjectEncoder)
+
+        # 保存区块链状态
+        blockchain_state_filename = os.path.join(
+            config["system"]["res_root"],
+            f'blockchain_state_round_{global_round}.json'
+        )
+        with open(blockchain_state_filename, 'w') as f:
+            json.dump(blockchain.get_chain_info(), f, indent=2)
+
+    # 验证区块链完整性
+    if blockchain.verify_chain():
+        print("\n区块链验证成功！")
+    else:
+        print("\n警告：区块链验证失败！")
 
 if __name__ == "__main__":
     fed_run()

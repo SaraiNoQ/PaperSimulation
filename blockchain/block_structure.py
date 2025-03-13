@@ -22,25 +22,29 @@ class SubBlock:
                  cluster_id: int,
                  round_num: int,
                  prev_hash: str,
-                 model_params: Dict[str, torch.Tensor],
+                 model_params: Dict[str, Any],
                  clients_info: List[ClientInfo]):
         self.timestamp = time.time()
         self.cluster_id = cluster_id
         self.round_num = round_num
         self.prev_hash = prev_hash
-        self.model_params = {k: v.cpu().numpy().tolist() for k, v in model_params.items()}
+        self.model_params = model_params
+        # 预计算模型参数哈希
+        model_params_str = json.dumps(model_params, sort_keys=True)
+        self.model_params_hash = hashlib.sha256(model_params_str.encode()).hexdigest()
         self.clients_info = clients_info
         self.nonce = 0
         self.hash = self.calculate_hash()
 
     def calculate_hash(self) -> str:
         """计算区块哈希值"""
+        # 使用预计算的模型参数哈希
         block_content = {
             'timestamp': self.timestamp,
             'cluster_id': self.cluster_id,
             'round_num': self.round_num,
             'prev_hash': self.prev_hash,
-            'model_params_hash': hashlib.sha256(str(self.model_params).encode()).hexdigest(),
+            'model_params_hash': self.model_params_hash,
             'clients_info': [client.to_dict() for client in self.clients_info],
             'nonce': self.nonce
         }
@@ -49,9 +53,20 @@ class SubBlock:
 
     def mine_block(self, difficulty: int):
         """挖掘区块"""
-        while self.hash[:difficulty] != '0' * difficulty:
-            self.nonce += 1
+        target = '0' * difficulty
+        max_attempts = 1000000  # 限制最大尝试次数
+        
+        for i in range(max_attempts):
+            self.nonce = i
             self.hash = self.calculate_hash()
+            if self.hash[:difficulty] == target:
+                return
+            
+            # 每1000次尝试打印一次进度
+            if i % 1000 == 0:
+                print(f"Mining progress: {i} attempts")
+        
+        print("Warning: Maximum mining attempts reached")
 
     def to_dict(self) -> Dict:
         return {
@@ -71,12 +86,17 @@ class MainBlock:
                  round_num: int,
                  prev_hash: str,
                  sub_blocks: List[SubBlock],
-                 global_model_params: Dict[str, torch.Tensor]):
+                 global_model_params: Dict[str, Any]):
         self.timestamp = time.time()
         self.round_num = round_num
         self.prev_hash = prev_hash
         self.sub_blocks_pointers = [block.hash for block in sub_blocks]
-        self.global_model_params = {k: v.cpu().numpy().tolist() for k, v in global_model_params.items()}
+        self.global_model_params = global_model_params
+        
+        # 预计算所有哈希值
+        self.global_model_params_hash = hashlib.sha256(
+            json.dumps(global_model_params, sort_keys=True).encode()
+        ).hexdigest()
         self.sub_chain_cid = self.calculate_sub_chain_cid(sub_blocks)
         self.nonce = 0
         self.hash = self.calculate_hash()
@@ -84,7 +104,8 @@ class MainBlock:
     def calculate_sub_chain_cid(self, sub_blocks: List[SubBlock]) -> str:
         """计算子区块链的CID"""
         sub_blocks_content = [block.to_dict() for block in sub_blocks]
-        return hashlib.sha256(str(sub_blocks_content).encode()).hexdigest()
+        sub_blocks_str = json.dumps(sub_blocks_content, sort_keys=True)
+        return hashlib.sha256(sub_blocks_str.encode()).hexdigest()
 
     def calculate_hash(self) -> str:
         """计算区块哈希值"""
@@ -93,7 +114,7 @@ class MainBlock:
             'round_num': self.round_num,
             'prev_hash': self.prev_hash,
             'sub_blocks_pointers': self.sub_blocks_pointers,
-            'global_model_params_hash': hashlib.sha256(str(self.global_model_params).encode()).hexdigest(),
+            'global_model_params_hash': self.global_model_params_hash,
             'sub_chain_cid': self.sub_chain_cid,
             'nonce': self.nonce
         }
@@ -102,9 +123,22 @@ class MainBlock:
 
     def mine_block(self, difficulty: int):
         """挖掘区块"""
-        while self.hash[:difficulty] != '0' * difficulty:
-            self.nonce += 1
+        target = '0' * difficulty
+        max_attempts = 1000000  # 限制最大尝试次数
+        
+        print(f"开始挖掘主区块（轮次 {self.round_num}）...")
+        for i in range(max_attempts):
+            self.nonce = i
             self.hash = self.calculate_hash()
+            if self.hash[:difficulty] == target:
+                print(f"主区块挖掘成功（轮次 {self.round_num}）")
+                return
+            
+            # 每1000次尝试打印一次进度
+            if i % 10000 == 0:
+                print(f"主区块挖掘进度: {i} attempts")
+        
+        print(f"警告：主区块（轮次 {self.round_num}）达到最大挖掘尝试次数")
 
     def to_dict(self) -> Dict:
         return {
@@ -129,7 +163,7 @@ class BlockChain:
     def create_sub_block(self,
                         cluster_id: int,
                         round_num: int,
-                        model_params: Dict[str, torch.Tensor],
+                        model_params: Dict[str, Any],
                         clients_info: List[ClientInfo]) -> SubBlock:
         """创建新的子区块"""
         prev_hash = '0' * 64 if cluster_id not in self.sub_chains or not self.sub_chains[cluster_id] \
@@ -147,18 +181,25 @@ class BlockChain:
 
     def create_main_block(self,
                          round_num: int,
-                         global_model_params: Dict[str, torch.Tensor]) -> MainBlock:
+                         global_model_params: Dict[str, Any]) -> MainBlock:
         """创建新的主区块"""
         prev_hash = '0' * 64 if not self.main_chain else self.main_chain[-1].hash
         sub_blocks = list(self.pending_sub_blocks.values())
         
-        new_block = MainBlock(round_num, prev_hash, sub_blocks, global_model_params)
-        new_block.mine_block(self.difficulty)
-        
-        self.main_chain.append(new_block)
-        self.pending_sub_blocks.clear()
-        
-        return new_block
+        print(f"开始创建主区块（轮次 {round_num}）...")
+        try:
+            new_block = MainBlock(round_num, prev_hash, sub_blocks, global_model_params)
+            new_block.mine_block(self.difficulty)
+            
+            self.main_chain.append(new_block)
+            self.pending_sub_blocks.clear()
+            
+            print(f"主区块创建完成（轮次 {round_num}）")
+            return new_block
+            
+        except Exception as e:
+            print(f"创建主区块时出错（轮次 {round_num}）: {str(e)}")
+            raise e
 
     def verify_chain(self) -> bool:
         """验证区块链的完整性"""
