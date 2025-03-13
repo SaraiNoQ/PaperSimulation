@@ -11,7 +11,6 @@ from tqdm import tqdm
 import numpy as np
 import torch
 import time
-import threading
 import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor
 from queue import Queue
@@ -21,7 +20,6 @@ from fed_baselines.server_base import FedServer
 
 from postprocessing.recorder import Recorder
 from preprocessing.baselines_dataloader import divide_data, divide_noniid_data
-from utils.models import LeNet
 from utils.similarity_cal import WassersteinSimilarity, PearsonSimilarity, JSDistanceSimilarity, perform_spectral_clustering, visualize_clustering_results
 
 # 用于将python对象序列化为json对象

@@ -119,11 +119,11 @@ class FedClient(object):
             total_loss = avg_epoch_loss  # 保存最后一个epoch的损失
             
             # 打印训练信息（可选）
-            # if (epoch + 1) % 5 == 0:  # 每5个epoch打印一次
-            #     current_lr = optimizer.param_groups[0]['lr']
-            #     print(f"Client {self.name} - Epoch [{epoch+1}/{self._epoch}], "
-            #           f"Loss: {avg_epoch_loss:.4f}, "
-            #           f"Learning Rate: {current_lr:.6f}")
+            if (epoch + 1) % 3 == 0:  # 每5个epoch打印一次
+                current_lr = optimizer.param_groups[0]['lr']
+                print(f"Client {self.name} - Epoch [{epoch+1}/{self._epoch}], "
+                      f"Loss: {avg_epoch_loss:.4f}, "
+                      f"Learning Rate: {current_lr:.6f}")
 
         # 返回模型参数和训练信息
         return self.model.state_dict(), self.n_data, total_loss
