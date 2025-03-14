@@ -135,7 +135,7 @@ class MainBlock:
                 return
             
             # 每1000次尝试打印一次进度
-            if i % 10000 == 0:
+            if i % 1000 == 0:
                 print(f"主区块挖掘进度: {i} attempts")
         
         print(f"警告：主区块（轮次 {self.round_num}）达到最大挖掘尝试次数")
