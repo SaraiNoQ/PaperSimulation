@@ -22,9 +22,12 @@ from postprocessing.recorder import Recorder
 from preprocessing.baselines_dataloader import divide_data, divide_noniid_data
 from utils.similarity_cal import WassersteinSimilarity, PearsonSimilarity, JSDistanceSimilarity, perform_spectral_clustering, visualize_clustering_results
 
-from typing import Dict, Any
+from typing import Dict, Any, List
 from blockchain.block_structure import BlockChain, ClientInfo
-from blockchain.consensus import DPoSElection, HotStuffConsensus, Vote, SuperNode, Transaction, HotStuffMessage, ConsensusBlockChain
+from blockchain.consensus import (
+    DPoSElection, HotStuffConsensus, Vote, SuperNode, 
+    Transaction, HotStuffMessage, ConsensusBlockChain, Block as ConsensusBlock
+)
 
 # 用于将python对象序列化为json对象
 json_types = (list, dict, str, int, float, bool, type(None))
@@ -83,6 +86,100 @@ def serialize_model_params(model_params: Dict[str, torch.Tensor]) -> Dict[str, A
 
 def serialize_super_nodes(nodes):
     return [node.to_dict() for node in nodes] if nodes else []
+
+def run_consensus(hotstuff_consensus: HotStuffConsensus, 
+                 consensus_block: ConsensusBlock,  # 使用重命名后的类型
+                 serialized_super_nodes: List[Dict], 
+                 cluster_id: int) -> bool:
+    """运行共识过程"""
+    retry_count = 0
+    while retry_count < hotstuff_consensus.max_retries:
+        try:
+            # 重置共识状态
+            hotstuff_consensus.reset_phase()
+            
+            # 启动共识过程
+            hotstuff_consensus.start_consensus(consensus_block.hash)
+            hotstuff_consensus.start_phase_timer()
+            
+            # Prepare阶段
+            prepare_votes = 0
+            for node in serialized_super_nodes:
+                if hotstuff_consensus.is_phase_timeout():
+                    raise TimeoutError("Prepare phase timeout")
+                    
+                prepare_msg = HotStuffMessage(
+                    sender_id=node['node_id'],
+                    phase="prepare",
+                    block_hash=consensus_block.hash,
+                    view_number=hotstuff_consensus.view_number
+                )
+                hotstuff_consensus.receive_prepare(prepare_msg)
+                prepare_votes += 1
+                
+                if hotstuff_consensus._has_quorum(hotstuff_consensus.prepare_messages):
+                    break
+            
+            if not hotstuff_consensus._has_quorum(hotstuff_consensus.prepare_messages):
+                raise Exception(f"Prepare phase failed: only received {prepare_votes} votes")
+            
+            # Pre-commit阶段
+            hotstuff_consensus.start_phase_timer()
+            pre_commit_votes = 0
+            for node in serialized_super_nodes:
+                if hotstuff_consensus.is_phase_timeout():
+                    raise TimeoutError("Pre-commit phase timeout")
+                    
+                pre_commit_msg = HotStuffMessage(
+                    sender_id=node['node_id'],
+                    phase="pre-commit",
+                    block_hash=consensus_block.hash,
+                    view_number=hotstuff_consensus.view_number
+                )
+                hotstuff_consensus.receive_pre_commit(pre_commit_msg)
+                pre_commit_votes += 1
+                
+                if hotstuff_consensus._has_quorum(hotstuff_consensus.pre_commit_messages):
+                    break
+            
+            if not hotstuff_consensus._has_quorum(hotstuff_consensus.pre_commit_messages):
+                raise Exception(f"Pre-commit phase failed: only received {pre_commit_votes} votes")
+            
+            # Commit阶段
+            hotstuff_consensus.start_phase_timer()
+            commit_votes = 0
+            consensus_reached = False
+            for node in serialized_super_nodes:
+                if hotstuff_consensus.is_phase_timeout():
+                    raise TimeoutError("Commit phase timeout")
+                    
+                commit_msg = HotStuffMessage(
+                    sender_id=node['node_id'],
+                    phase="commit",
+                    block_hash=consensus_block.hash,
+                    view_number=hotstuff_consensus.view_number
+                )
+                consensus_reached = hotstuff_consensus.receive_commit(commit_msg)
+                commit_votes += 1
+                
+                if consensus_reached:
+                    break
+            
+            if not consensus_reached:
+                print(f"簇 {cluster_id} 共识未达成（尝试 {retry_count + 1}/{hotstuff_consensus.max_retries}）：")
+                print(f"- 当前阶段: {hotstuff_consensus.current_phase}")
+                print(f"- 活跃超级节点数: {len(serialized_super_nodes)}")
+                print(f"- 已收到消息数: {len(hotstuff_consensus.commit_messages)}")
+                raise Exception(f"Commit phase failed: only received {commit_votes} votes")
+            
+            return True
+            
+        except (TimeoutError, Exception) as e:
+            print(f"簇 {cluster_id} 共识失败（尝试 {retry_count + 1}/{hotstuff_consensus.max_retries}）: {str(e)}")
+            retry_count += 1
+            time.sleep(1)  # 等待一秒后重试
+    
+    return False
 
 def train_cluster(args):
     """
@@ -193,47 +290,17 @@ def train_cluster(args):
             super_nodes=serialized_super_nodes
         )
         
-        # 启动HotStuff共识过程
-        hotstuff_consensus.start_consensus(consensus_block.hash)
+        # 运行共识过程
+        consensus_success = run_consensus(
+            hotstuff_consensus, 
+            consensus_block, 
+            serialized_super_nodes,
+            cluster_id
+        )
         
-        # 收集超级节点的投票
-        consensus_reached = False
-        for node in serialized_super_nodes:
-            # Prepare阶段
-            prepare_msg = HotStuffMessage(
-                sender_id=node['node_id'],
-                phase="prepare",
-                block_hash=consensus_block.hash,
-                view_number=hotstuff_consensus.view_number
-            )
-            hotstuff_consensus.receive_prepare(prepare_msg)
-            
-            # Pre-commit阶段
-            if hotstuff_consensus.current_phase == "pre-commit":
-                pre_commit_msg = HotStuffMessage(
-                    sender_id=node['node_id'],
-                    phase="pre-commit",
-                    block_hash=consensus_block.hash,
-                    view_number=hotstuff_consensus.view_number
-                )
-                hotstuff_consensus.receive_pre_commit(pre_commit_msg)
-            
-            # Commit阶段
-            if hotstuff_consensus.current_phase == "commit":
-                commit_msg = HotStuffMessage(
-                    sender_id=node['node_id'],
-                    phase="commit",
-                    block_hash=consensus_block.hash,
-                    view_number=hotstuff_consensus.view_number
-                )
-                consensus_reached = hotstuff_consensus.receive_commit(commit_msg)
-                
-                if consensus_reached:
-                    break
-
-        if not consensus_reached:
-            raise Exception("Failed to reach consensus")
-
+        if not consensus_success:
+            raise Exception(f"Failed to reach consensus after {hotstuff_consensus.max_retries} attempts")
+        
         # 将共识区块添加到共识链
         consensus_blockchain.add_block(consensus_block)
         print(f'簇 {cluster_id} 区块创建完成，共识验证通过')

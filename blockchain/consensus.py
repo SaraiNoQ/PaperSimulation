@@ -184,7 +184,8 @@ class DPoSElection:
 
 class HotStuffConsensus:
     """HotStuff共识协议实现"""
-    def __init__(self, leader_id: str, super_node_ids: List[str]):
+    def __init__(self, leader_id: str, super_node_ids: List[str], 
+                 timeout: float = 30.0, max_retries: int = 3):
         self.leader_id = leader_id
         self.super_node_ids = super_node_ids
         self.view_number = 0
@@ -199,6 +200,28 @@ class HotStuffConsensus:
         self.pre_commit_messages: Dict[str, HotStuffMessage] = {}
         self.commit_messages: Dict[str, HotStuffMessage] = {}
         self.decide_messages: Dict[str, HotStuffMessage] = {}
+        
+        # 超时和重试相关
+        self.timeout = timeout  # 每个阶段的超时时间（秒）
+        self.max_retries = max_retries  # 最大重试次数
+        self.start_time = 0.0  # 当前阶段开始时间
+    
+    def reset_phase(self) -> None:
+        """重置当前阶段"""
+        self.prepare_messages.clear()
+        self.pre_commit_messages.clear()
+        self.commit_messages.clear()
+        self.decide_messages.clear()
+        self.current_phase = ""
+        self.start_time = 0.0
+    
+    def start_phase_timer(self) -> None:
+        """开始计时"""
+        self.start_time = time.time()
+    
+    def is_phase_timeout(self) -> bool:
+        """检查当前阶段是否超时"""
+        return time.time() - self.start_time > self.timeout
     
     def start_consensus(self, block_hash: str) -> None:
         """开始共识过程"""
@@ -218,12 +241,14 @@ class HotStuffConsensus:
     def receive_prepare(self, message: HotStuffMessage) -> None:
         """接收prepare消息"""
         if message.phase != "prepare" or message.view_number != self.view_number:
+            print(f"Invalid prepare message: phase={message.phase}, view={message.view_number}")
             return
         
         self.prepare_messages[message.sender_id] = message
+        print(f"Received prepare message from {message.sender_id}, total: {len(self.prepare_messages)}")
         
-        # 检查是否收到足够的prepare消息
         if self._has_quorum(self.prepare_messages):
+            print("Prepare phase reached quorum")
             self.current_phase = "pre-commit"
             self.pre_committed_block_hash = self.prepared_block_hash
             
