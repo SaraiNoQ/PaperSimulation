@@ -24,7 +24,7 @@ from utils.similarity_cal import WassersteinSimilarity, PearsonSimilarity, JSDis
 
 from typing import Dict, Any
 from blockchain.block_structure import BlockChain, ClientInfo
-from blockchain.consensus import DPoSElection, HotStuffConsensus, Vote, SuperNode, Transaction, HotStuffMessage
+from blockchain.consensus import DPoSElection, HotStuffConsensus, Vote, SuperNode, Transaction, HotStuffMessage, ConsensusBlockChain
 
 # 用于将python对象序列化为json对象
 json_types = (list, dict, str, int, float, bool, type(None))
@@ -88,7 +88,7 @@ def train_cluster(args):
     """
     单个簇的训练函数
     """
-    cluster_id, members, client_dict, cluster_server, cluster_recorder, blockchain, hotstuff_consensus, super_nodes = args
+    cluster_id, members, client_dict, cluster_server, cluster_recorder, blockchain, consensus_blockchain, hotstuff_consensus, super_nodes = args
     
     try:
         # 获取设备信息
@@ -102,8 +102,9 @@ def train_cluster(args):
         
         # 簇内每个节点进行本地训练
         client_states = {}
-        # 数据量
+        client_transactions = []  # 存储客户端交易
         data_num = 0
+        
         for client_id in members:
             try:
                 # 获取簇内服务器的全局模型
@@ -121,6 +122,19 @@ def train_cluster(args):
                 # 增加数据量
                 data_num += n_data
                 
+                # 创建交易对象，包含模型更新
+                transaction = Transaction(
+                    client_id=client_id,
+                    model_update=serialize_model_params(state_dict),
+                    reputation=calculate_reputation(
+                        client_id,
+                        old_model_params,
+                        state_dict,
+                        cluster_server.test()  # 使用当前簇的准确率
+                    )
+                )
+                client_transactions.append(transaction)
+                
                 # 确保状态字典中的所有张量都在正确的设备上
                 state_dict = {k: v.to(device) for k, v in state_dict.items()}
                 client_states[client_id] = (state_dict, int(n_data), float(loss))
@@ -136,6 +150,26 @@ def train_cluster(args):
                 print(f"Error training client {client_id} in cluster {cluster_id}: {str(e)}")
                 continue
 
+        # 执行DPoS选举
+        dpos_election = DPoSElection(
+            clients_info={
+                tx.client_id: tx.reputation 
+                for tx in client_transactions
+            }
+        )
+        dpos_election.nominate_candidates()
+        dpos_election.vote()
+        
+        # 选举超级节点
+        super_nodes = dpos_election.elect_super_nodes()
+        
+        # 选择leader节点
+        leader_id = dpos_election.select_leader()
+        super_node_ids = [node.node_id for node in super_nodes]
+        
+        # 初始化HotStuff共识
+        hotstuff_consensus = HotStuffConsensus(leader_id, super_node_ids)
+
         # 簇内服务器聚合模型
         cluster_server.select_clients()
         cluster_global_state, avg_loss, _ = cluster_server.agg()
@@ -144,51 +178,65 @@ def train_cluster(args):
         accuracy = cluster_server.test()
         cluster_server.flush()
 
-        # 计算每个客户端的信誉值并创建ClientInfo对象
-        clients_info = []
-        for client_id in members:
-            if client_id in client_states:
-                reputation = calculate_reputation(
-                    client_id, 
-                    old_model_params,
-                    client_states[client_id][0],
-                    accuracy
-                )
-                clients_info.append(ClientInfo(client_id, float(reputation)))
-
-        # 创建子区块
-        # 确保模型参数在CPU上并转换为可序列化格式
+        # 序列化全局模型
         serializable_params = serialize_model_params(cluster_global_state)
-        try:
-            # 序列化超级节点列表
-            serialized_super_nodes = serialize_super_nodes(super_nodes)
-            sub_block = blockchain.create_sub_block(
-                cluster_id=int(cluster_id),
-                round_num=len(cluster_recorder.res['server']['iid_accuracy']),
-                model_params=serializable_params,
-                clients_info=clients_info
+        
+        # 序列化超级节点列表
+        serialized_super_nodes = serialize_super_nodes(super_nodes)
+        
+        # 创建共识区块
+        consensus_block = consensus_blockchain.create_sub_block(
+            cluster_id=int(cluster_id),
+            round_num=len(cluster_recorder.res['server']['iid_accuracy']),
+            model_params=serializable_params,
+            transactions=client_transactions,
+            super_nodes=serialized_super_nodes
+        )
+        
+        # 启动HotStuff共识过程
+        hotstuff_consensus.start_consensus(consensus_block.hash)
+        
+        # 收集超级节点的投票
+        consensus_reached = False
+        for node in serialized_super_nodes:
+            # Prepare阶段
+            prepare_msg = HotStuffMessage(
+                sender_id=node['node_id'],
+                phase="prepare",
+                block_hash=consensus_block.hash,
+                view_number=hotstuff_consensus.view_number
             )
-            # 启动共识过程
-            hotstuff_consensus.start_consensus(sub_block.hash)
-            # 等待共识达成
-            consensus_reached = False
-            for node in serialized_super_nodes:
-                prepare_msg = HotStuffMessage(
+            hotstuff_consensus.receive_prepare(prepare_msg)
+            
+            # Pre-commit阶段
+            if hotstuff_consensus.current_phase == "pre-commit":
+                pre_commit_msg = HotStuffMessage(
                     sender_id=node['node_id'],
-                    phase="prepare",
-                    block_hash=sub_block.hash,
+                    phase="pre-commit",
+                    block_hash=consensus_block.hash,
                     view_number=hotstuff_consensus.view_number
                 )
-                hotstuff_consensus.receive_prepare(prepare_msg)
+                hotstuff_consensus.receive_pre_commit(pre_commit_msg)
+            
+            # Commit阶段
+            if hotstuff_consensus.current_phase == "commit":
+                commit_msg = HotStuffMessage(
+                    sender_id=node['node_id'],
+                    phase="commit",
+                    block_hash=consensus_block.hash,
+                    view_number=hotstuff_consensus.view_number
+                )
+                consensus_reached = hotstuff_consensus.receive_commit(commit_msg)
+                
+                if consensus_reached:
+                    break
 
-            print('子区块创建完成，共识验证通过')
-        except Exception as e:
-            print(f"创建子区块时出错: {str(e)}")
-            raise e
+        if not consensus_reached:
+            raise Exception("Failed to reach consensus")
 
-        # 记录簇内结果
-        cluster_recorder.res['server']['iid_accuracy'].append(float(accuracy))
-        cluster_recorder.res['server']['train_loss'].append(float(avg_loss))
+        # 将共识区块添加到共识链
+        consensus_blockchain.add_block(consensus_block)
+        print(f'簇 {cluster_id} 区块创建完成，共识验证通过')
         
         # 将服务器模型移回CPU并清理内存
         cluster_server.model = cluster_server.model.cpu()
@@ -201,7 +249,7 @@ def train_cluster(args):
             'accuracy': float(accuracy),
             # 'n_members': int(len(members)),
             'n_members': int(data_num),
-            'sub_block': sub_block
+            'sub_block': consensus_block
         }
         
     except Exception as e:
@@ -212,7 +260,7 @@ def train_cluster(args):
         torch.cuda.empty_cache()
         raise e
 
-def train_clusters_sequential(clusters, client_dict, cluster_servers, cluster_recorders, blockchain, hotstuff_consensus, super_nodes):
+def train_clusters_sequential(clusters, client_dict, cluster_servers, cluster_recorders, blockchain, consensus_blockchain, hotstuff_consensus, super_nodes):
     """
     顺序训练所有簇
     """
@@ -226,6 +274,7 @@ def train_clusters_sequential(clusters, client_dict, cluster_servers, cluster_re
                                   cluster_servers[cluster_id], 
                                   cluster_recorders[cluster_id],
                                   blockchain,
+                                  consensus_blockchain,
                                   hotstuff_consensus,
                                   super_nodes))
             cluster_results.append(result)
@@ -239,7 +288,7 @@ def train_clusters_sequential(clusters, client_dict, cluster_servers, cluster_re
             torch.cuda.empty_cache()
     return cluster_results
 
-def train_clusters_concurrent(clusters, client_dict, cluster_servers, cluster_recorders, blockchain, num_threads, hotstuff_consensus, super_nodes):
+def train_clusters_concurrent(clusters, client_dict, cluster_servers, cluster_recorders, blockchain, consensus_blockchain, num_threads, hotstuff_consensus, super_nodes):
     """
     并发训练所有簇
     """
@@ -248,7 +297,7 @@ def train_clusters_concurrent(clusters, client_dict, cluster_servers, cluster_re
         # 准备每个簇的训练参数
         cluster_args = [
             (cluster_id, members, client_dict, cluster_servers[cluster_id], 
-             cluster_recorders[cluster_id], blockchain, hotstuff_consensus, super_nodes)
+             cluster_recorders[cluster_id], blockchain, consensus_blockchain, hotstuff_consensus, super_nodes)
             for cluster_id, members in clusters.items()
         ]
         
@@ -397,7 +446,7 @@ def fed_run():
     # 继续原有的联邦学习训练循环
     print("\n开始分层联邦学习训练...")
 
-    # 为每个簇创建一个独立的服务器和记录器
+    # 为每个簇创建服务器和记录器
     cluster_servers = {}
     cluster_recorders = {}
     cluster_max_acc = {}
@@ -425,23 +474,27 @@ def fed_run():
         cluster_recorders[cluster_id] = Recorder()
         cluster_max_acc[cluster_id] = 0
 
-    # 初始化DPoS选举
-    dpos_election = DPoSElection(clients_info={client_id: 1.0 for client_id in trainset_config['users']})  # 初始时所有客户端信誉值相同
-    dpos_election.nominate_candidates()
-    dpos_election.vote()
+    # 初始化主区块链实例（用于存储）
+    blockchain = BlockChain(difficulty=2)
+    # 初始化共识区块链-子区块链实例（用于共识）
+    consensus_blockchain = ConsensusBlockChain()
     
-    # 选举超级节点
-    super_nodes = dpos_election.elect_super_nodes()
+    # 初始化DPoS选举（使用所有客户端的初始信誉值）
+    initial_dpos_election = DPoSElection(
+        clients_info={client_id: 1.0 for client_id in trainset_config['users']}
+    )
+    initial_dpos_election.nominate_candidates()
+    initial_dpos_election.vote()
     
-    # 选择leader节点
-    leader_id = dpos_election.select_leader()
-    super_node_ids = [node.node_id for node in super_nodes]
+    # 选举初始超级节点
+    initial_super_nodes = initial_dpos_election.elect_super_nodes()
+    
+    # 选择初始leader节点
+    initial_leader_id = initial_dpos_election.select_leader()
+    initial_super_node_ids = [node.node_id for node in initial_super_nodes]
     
     # 初始化HotStuff共识
-    hotstuff_consensus = HotStuffConsensus(leader_id, super_node_ids)
-    
-    # 创建区块链实例
-    blockchain = BlockChain(difficulty=2)
+    hotstuff_consensus = HotStuffConsensus(initial_leader_id, initial_super_node_ids)
     
     # 并行训练每个簇
     pbar = tqdm(range(config["system"]["num_round"]))
@@ -453,12 +506,14 @@ def fed_run():
             num_threads = len(clusters)  # 每个簇一个线程
             cluster_results = train_clusters_concurrent(
                 clusters, client_dict, cluster_servers, 
-                cluster_recorders, blockchain, num_threads, hotstuff_consensus, super_nodes
+                cluster_recorders, blockchain, consensus_blockchain,
+                num_threads, hotstuff_consensus, initial_super_nodes
             )
         else:
             cluster_results = train_clusters_sequential(
                 clusters, client_dict, cluster_servers, 
-                cluster_recorders, blockchain, hotstuff_consensus, super_nodes
+                cluster_recorders, blockchain, consensus_blockchain,
+                hotstuff_consensus, initial_super_nodes
             )
         
         # 处理训练结果
@@ -500,7 +555,7 @@ def fed_run():
             # 启动共识过程
             hotstuff_consensus.start_consensus(main_block.hash)
             # 序列化super_nodes
-            serialized_main_spuer_nodes = serialize_super_nodes(super_nodes)
+            serialized_main_spuer_nodes = serialize_super_nodes(initial_super_nodes)
             # 等待共识达成
             consensus_reached = False
             for node in serialized_main_spuer_nodes:

@@ -346,58 +346,49 @@ class MemPool:
         return False
 
 class Block:
-    """区块类，包含多个交易和联邦学习相关信息"""
-    def __init__(self, previous_hash: str, transactions: List[Transaction], creator_id: str,
-                 cluster_id: int = None, round_num: int = None,
-                 model_params: Dict = None, clients_info: Dict = None,
-                 global_model_params: Dict = None, sub_blocks_cid: List[str] = None):
+    """区块类，用于共识过程"""
+    def __init__(self, previous_hash: str, transactions: List[Transaction], 
+                 creator_id: str, cluster_id: int, round_num: int,
+                 model_params: Dict, clients_info: Dict[str, float],
+                 super_nodes: List[Dict]):
         self.previous_hash = previous_hash
         self.transactions = transactions
         self.creator_id = creator_id
+        self.cluster_id = cluster_id
+        self.round_num = round_num
+        self.model_params = model_params
+        self.clients_info = clients_info
+        self.super_nodes = super_nodes
         self.timestamp = time.time()
-        self.nonce = 0
-        
-        # 联邦学习相关信息
-        self.cluster_id = cluster_id  # 簇ID（子区块专用）
-        self.round_num = round_num    # 训练轮次
-        self.model_params = model_params  # 模型参数（子区块：簇内聚合结果，主区块：全局聚合结果）
-        self.clients_info = clients_info  # 客户端信息（子区块专用）
-        self.global_model_params = global_model_params  # 全局模型参数（主区块专用）
-        self.sub_blocks_cid = sub_blocks_cid  # 子区块CID列表（主区块专用）
-        
         self.hash = self._calculate_hash()
-    
+
     def _calculate_hash(self) -> str:
-        """计算区块的哈希值"""
+        """计算区块哈希值"""
         block_content = {
             'previous_hash': self.previous_hash,
             'transactions': [tx.to_dict() for tx in self.transactions],
             'creator_id': self.creator_id,
-            'timestamp': self.timestamp,
-            'nonce': self.nonce,
             'cluster_id': self.cluster_id,
             'round_num': self.round_num,
             'model_params': self.model_params,
             'clients_info': self.clients_info,
-            'global_model_params': self.global_model_params,
-            'sub_blocks_cid': self.sub_blocks_cid
+            'super_nodes': self.super_nodes,
+            'timestamp': self.timestamp
         }
         block_string = json.dumps(block_content, sort_keys=True)
         return hashlib.sha256(block_string.encode()).hexdigest()
-    
+
     def to_dict(self) -> Dict:
         return {
             'previous_hash': self.previous_hash,
             'transactions': [tx.to_dict() for tx in self.transactions],
             'creator_id': self.creator_id,
-            'timestamp': self.timestamp,
-            'nonce': self.nonce,
             'cluster_id': self.cluster_id,
             'round_num': self.round_num,
             'model_params': self.model_params,
             'clients_info': self.clients_info,
-            'global_model_params': self.global_model_params,
-            'sub_blocks_cid': self.sub_blocks_cid,
+            'super_nodes': self.super_nodes,
+            'timestamp': self.timestamp,
             'hash': self.hash
         }
 
@@ -446,3 +437,33 @@ class BlockValidator:
         calculated_signature = hashlib.sha256(tx_string.encode()).hexdigest()
         
         return calculated_signature == transaction.signature
+
+class ConsensusBlockChain:
+    """共识区块链类，用于共识过程"""
+    def __init__(self):
+        self.chain: List[Block] = []
+    
+    def add_block(self, block: Block) -> None:
+        """添加区块到区块链"""
+        self.chain.append(block)
+    
+    def create_sub_block(self, cluster_id: int, round_num: int, 
+                        model_params: Dict, transactions: List[Transaction],
+                        super_nodes: List[Dict]) -> Block:
+        """创建子区块"""
+        # 获取前一个区块的哈希值
+        previous_hash = self.chain[-1].hash if self.chain else "0"
+        
+        # 创建新区块
+        block = Block(
+            previous_hash=previous_hash,
+            transactions=transactions,  # 包含所有交易
+            creator_id=f"cluster_{cluster_id}",
+            cluster_id=cluster_id,
+            round_num=round_num,
+            model_params=model_params,  # 簇内聚合后的模型参数
+            clients_info={tx.client_id: tx.reputation for tx in transactions},  # 客户端信誉值
+            super_nodes=super_nodes  # 超级节点信息
+        )
+        
+        return block
