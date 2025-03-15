@@ -102,6 +102,8 @@ def train_cluster(args):
         
         # 簇内每个节点进行本地训练
         client_states = {}
+        # 数据量
+        data_num = 0
         for client_id in members:
             try:
                 # 获取簇内服务器的全局模型
@@ -115,6 +117,9 @@ def train_cluster(args):
                 
                 # 本地训练得到模型参数、数据量和loss
                 state_dict, n_data, loss = client_dict[client_id].train()
+
+                # 增加数据量
+                data_num += n_data
                 
                 # 确保状态字典中的所有张量都在正确的设备上
                 state_dict = {k: v.to(device) for k, v in state_dict.items()}
@@ -194,7 +199,8 @@ def train_cluster(args):
             'global_state': cluster_global_state,
             'avg_loss': float(avg_loss),
             'accuracy': float(accuracy),
-            'n_members': int(len(members)),
+            # 'n_members': int(len(members)),
+            'n_members': int(data_num),
             'sub_block': sub_block
         }
         
