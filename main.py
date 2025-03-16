@@ -273,6 +273,22 @@ def train_cluster(args):
 
         # 簇内测试和记录
         accuracy = cluster_server.test()
+        
+        # 记录簇内结果
+        cluster_recorder.res['server']['iid_accuracy'].append(float(accuracy))
+        cluster_recorder.res['server']['train_loss'].append(float(avg_loss))
+        
+        # 记录每个客户端的结果
+        for client_id, (_, _, loss) in client_states.items():
+            if client_id not in cluster_recorder.res['clients']:
+                cluster_recorder.res['clients'][client_id] = {
+                    'train_loss': [],
+                    'iid_accuracy': []
+                }
+            cluster_recorder.res['clients'][client_id]['train_loss'].append(float(loss))
+            # 使用簇的准确率作为客户端的准确率
+            cluster_recorder.res['clients'][client_id]['iid_accuracy'].append(float(accuracy))
+
         cluster_server.flush()
 
         # 序列化全局模型
