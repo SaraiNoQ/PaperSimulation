@@ -52,14 +52,14 @@ def fed_args():
 
 def calculate_reputation(client_id: str, global_model_params: Dict[str, torch.Tensor], 
                        client_model_params: Dict[str, torch.Tensor], 
-                       old_reputation: float = 0.5) -> float:
+                       old_reputation: float = 50.0) -> float:
     """计算客户端信誉值
     
     Args:
         client_id: 客户端ID
         global_model_params: 簇内全局模型参数（median）
         client_model_params: 客户端上传的模型参数
-        old_reputation: 历史信誉值，默认为0.5
+        old_reputation: 历史信誉值，默认为50
         
     Returns:
         float: 更新后的信誉值
@@ -90,7 +90,7 @@ def calculate_reputation(client_id: str, global_model_params: Dict[str, torch.Te
     
     # 更新信誉值
     alpha = 0.7  # 平滑因子，可以根据需要调整
-    reputation = alpha * old_reputation + (1 - alpha) * (score / 100)  # 将score归一化到[0,1]
+    reputation = alpha * old_reputation + (1 - alpha) * score  # 将score归一化到[0,100]
     
     return float(reputation)
 
@@ -277,9 +277,9 @@ def train_cluster(args):
                     client_id=client_id,
                     model_update=serialize_model_params(state_dict),
                     model_params=state_dict,  # 添加原始模型参数
-                    reputation=0.5 if global_round == 0 else next(
+                    reputation=50.0 if global_round == 0 else next(
                         (tx.reputation for tx in client_transactions if tx.client_id == client_id), 
-                        0.5
+                        50.0
                     )  # 使用历史信誉值或初始值
                 )
                 client_transactions.append(transaction)
