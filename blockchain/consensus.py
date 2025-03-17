@@ -60,9 +60,11 @@ class SuperNode:
 
 class Transaction:
     """交易类，表示客户端提交的模型更新"""
-    def __init__(self, client_id: str, model_update: Dict[str, Any], reputation: float):
+    def __init__(self, client_id: str, model_update: Dict[str, Any], 
+                 model_params: Dict[str, torch.Tensor], reputation: float):
         self.client_id = client_id
-        self.model_update = model_update
+        self.model_update = model_update  # 序列化后的模型更新
+        self.model_params = model_params  # 原始模型参数
         self.reputation = reputation
         self.timestamp = time.time()
         self.signature = self._sign()
@@ -90,6 +92,12 @@ class Transaction:
             'timestamp': self.timestamp,
             'signature': self.signature
         }
+    
+    def update_reputation(self, new_reputation: float):
+        """更新信誉值"""
+        self.reputation = new_reputation
+        # 更新签名
+        self.signature = self._sign()
 
 class HotStuffMessage:
     """HotStuff协议消息类"""
@@ -476,22 +484,31 @@ class ConsensusBlockChain:
         self.chain.append(block)
     
     def create_sub_block(self, cluster_id: int, round_num: int, 
-                        model_params: Dict, transactions: List[Transaction],
+                        model_params: Dict[str, Any], 
+                        transactions: List[Transaction],
                         super_nodes: List[Dict]) -> Block:
-        """创建子区块"""
+        """创建子区块
+        
+        Args:
+            cluster_id: 簇ID
+            round_num: 轮次号
+            model_params: 序列化后的模型参数
+            transactions: 交易列表
+            super_nodes: 超级节点列表
+        """
         # 获取前一个区块的哈希值
         previous_hash = self.chain[-1].hash if self.chain else "0"
         
         # 创建新区块
         block = Block(
             previous_hash=previous_hash,
-            transactions=transactions,  # 包含所有交易
+            transactions=transactions,
             creator_id=f"cluster_{cluster_id}",
             cluster_id=cluster_id,
             round_num=round_num,
-            model_params=model_params,  # 簇内聚合后的模型参数
-            clients_info={tx.client_id: tx.reputation for tx in transactions},  # 客户端信誉值
-            super_nodes=super_nodes  # 超级节点信息
+            model_params=model_params,  # 已序列化的模型参数
+            clients_info={tx.client_id: tx.reputation for tx in transactions},
+            super_nodes=super_nodes
         )
         
         return block
@@ -685,3 +702,44 @@ class EnhancedHotStuffConsensus(HotStuffConsensus):
         print(f"- 尝试轮次: {round_count}")
         print(f"- 已尝试所有可能的Leader节点")
         return False, ""
+
+class SubBlock:
+    """子区块类"""
+    def __init__(self, 
+                 cluster_id: int,
+                 round_num: int,
+                 prev_hash: str,
+                 model_params: Dict[str, Any],
+                 global_model_params: Dict[str, torch.Tensor],
+                 transactions: List[Transaction],  # 使用transactions替代clients_info
+                 super_nodes: List[Dict]):
+        self.timestamp = time.time()
+        self.cluster_id = cluster_id
+        self.round_num = round_num
+        self.prev_hash = prev_hash
+        self.model_params = model_params
+        self.global_model_params = global_model_params
+        self.transactions = transactions
+        self.super_nodes = super_nodes
+        # 预计算模型参数哈希
+        model_params_str = json.dumps(model_params, sort_keys=True)
+        self.model_params_hash = hashlib.sha256(model_params_str.encode()).hexdigest()
+        self.nonce = 0
+        self.hash = self.calculate_hash()
+
+    def calculate_hash(self) -> str:
+        """计算子区块的哈希值"""
+        block_content = {
+            'timestamp': self.timestamp,
+            'cluster_id': self.cluster_id,
+            'round_num': self.round_num,
+            'prev_hash': self.prev_hash,
+            'model_params': self.model_params,
+            'global_model_params': self.global_model_params,
+            'transactions': [tx.to_dict() for tx in self.transactions],
+            'super_nodes': self.super_nodes,
+            'model_params_hash': self.model_params_hash,
+            'nonce': self.nonce
+        }
+        block_string = json.dumps(block_content, sort_keys=True)
+        return hashlib.sha256(block_string.encode()).hexdigest()

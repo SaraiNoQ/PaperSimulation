@@ -50,29 +50,49 @@ def fed_args():
     args = parser.parse_args()
     return args
 
-def calculate_reputation(client_id: str, old_model_params: Dict[str, torch.Tensor], 
-                       new_model_params: Dict[str, torch.Tensor], 
-                       cluster_accuracy: float) -> float:
-    """计算客户端信誉值"""
+def calculate_reputation(client_id: str, global_model_params: Dict[str, torch.Tensor], 
+                       client_model_params: Dict[str, torch.Tensor], 
+                       old_reputation: float = 0.5) -> float:
+    """计算客户端信誉值
+    
+    Args:
+        client_id: 客户端ID
+        global_model_params: 簇内全局模型参数（median）
+        client_model_params: 客户端上传的模型参数
+        old_reputation: 历史信誉值，默认为0.5
+        
+    Returns:
+        float: 更新后的信誉值
+    """
     # 确保所有张量在同一设备上
-    device = next(iter(old_model_params.values())).device
+    device = next(iter(global_model_params.values())).device
     
-    # 计算模型更新的欧氏距离
-    distance = 0
-    for key in old_model_params:
-        if key in new_model_params:
+    # 计算模型参数差异
+    total_diff = 0
+    total_params = 0
+    for key in global_model_params:
+        if key in client_model_params:
             # 确保两个张量在同一设备上
-            old_param = old_model_params[key].to(device)
-            new_param = new_model_params[key].to(device)
-            diff = old_param - new_param
-            distance += torch.norm(diff).item()
+            global_param = global_model_params[key].to(device)
+            client_param = client_model_params[key].to(device)
+            
+            # 计算参数差异
+            diff = torch.abs(client_param - global_param)
+            total_diff += torch.sum(diff).item()
+            total_params += diff.numel()
     
-    # 归一化距离到[0,1]区间
-    normalized_distance = 1.0 / (1.0 + distance)
+    # 计算平均差异
+    avg_diff = total_diff / total_params if total_params > 0 else float('inf')
     
-    # 将准确率和距离结合计算信誉值
-    reputation = float(0.7 * cluster_accuracy + 0.3 * normalized_distance)
-    return reputation
+    # 计算得分，使用指数衰减
+    k = 0.1  # 衰减系数，可以根据需要调整
+    score = 100 * np.exp(-k * avg_diff)
+    
+    # 更新信誉值
+    alpha = 0.7  # 平滑因子，可以根据需要调整
+    reputation = alpha * old_reputation + (1 - alpha) * (score / 100)  # 将score归一化到[0,1]
+    
+    return float(reputation)
 
 def serialize_model_params(model_params: Dict[str, torch.Tensor]) -> Dict[str, Any]:
     """序列化模型参数"""
@@ -207,7 +227,7 @@ def train_cluster(args):
     """
     单个簇的训练函数
     """
-    cluster_id, members, client_dict, cluster_server, cluster_recorder, blockchain, consensus_blockchain, hotstuff_consensus, super_nodes, config = args
+    cluster_id, members, client_dict, cluster_server, cluster_recorder, blockchain, consensus_blockchain, hotstuff_consensus, super_nodes, config, global_round = args
     
     try:
         # 获取设备信息
@@ -256,12 +276,11 @@ def train_cluster(args):
                 transaction = Transaction(
                     client_id=client_id,
                     model_update=serialize_model_params(state_dict),
-                    reputation=calculate_reputation(
-                        client_id,
-                        old_model_params,
-                        state_dict,
-                        cluster_server.test()  # 使用当前簇的准确率
-                    )
+                    model_params=state_dict,  # 添加原始模型参数
+                    reputation=0.5 if global_round == 0 else next(
+                        (tx.reputation for tx in client_transactions if tx.client_id == client_id), 
+                        0.5
+                    )  # 使用历史信誉值或初始值
                 )
                 client_transactions.append(transaction)
                 
@@ -376,6 +395,19 @@ def train_cluster(args):
             # 进行模型聚合（只使用可信节点的参数）
             cluster_server.select_clients()
             cluster_global_state, avg_loss, _ = cluster_server.agg()
+
+            # 更新每个客户端的信誉值
+            for tx in client_transactions:
+                if tx.client_id in trusted_nodes:
+                    # 计算新的信誉值
+                    new_reputation = calculate_reputation(
+                        tx.client_id,
+                        cluster_global_state,  # 簇内全局模型
+                        tx.model_params,       # 客户端原始模型参数
+                        tx.reputation          # 当前信誉值
+                    )
+                    # 更新交易中的信誉值
+                    tx.update_reputation(new_reputation)
 
             # 更新区块中的模型参数
             serializable_params = serialize_model_params(cluster_global_state)
@@ -544,7 +576,7 @@ def train_cluster(args):
         torch.cuda.empty_cache()
         raise e
 
-def train_clusters_sequential(clusters, client_dict, cluster_servers, cluster_recorders, blockchain, consensus_blockchain, hotstuff_consensus, super_nodes, config):
+def train_clusters_sequential(clusters, client_dict, cluster_servers, cluster_recorders, blockchain, consensus_blockchain, hotstuff_consensus, super_nodes, config, global_round):
     """
     顺序训练所有簇
     """
@@ -561,7 +593,8 @@ def train_clusters_sequential(clusters, client_dict, cluster_servers, cluster_re
                                   consensus_blockchain,
                                   hotstuff_consensus,
                                   super_nodes,
-                                  config))
+                                  config,
+                                  global_round))
             cluster_results.append(result)
             
             # 在每个簇训练后清理GPU内存
@@ -573,7 +606,7 @@ def train_clusters_sequential(clusters, client_dict, cluster_servers, cluster_re
             torch.cuda.empty_cache()
     return cluster_results
 
-def train_clusters_concurrent(clusters, client_dict, cluster_servers, cluster_recorders, blockchain, consensus_blockchain, num_threads, hotstuff_consensus, super_nodes, config):
+def train_clusters_concurrent(clusters, client_dict, cluster_servers, cluster_recorders, blockchain, consensus_blockchain, num_threads, hotstuff_consensus, super_nodes, config, global_round):
     """
     并发训练所有簇
     """
@@ -583,7 +616,7 @@ def train_clusters_concurrent(clusters, client_dict, cluster_servers, cluster_re
         cluster_args = [
             (cluster_id, members, client_dict, cluster_servers[cluster_id], 
              cluster_recorders[cluster_id], blockchain, consensus_blockchain, 
-             hotstuff_consensus, super_nodes, config)
+             hotstuff_consensus, super_nodes, config, global_round)
             for cluster_id, members in clusters.items()
         ]
         
@@ -794,14 +827,14 @@ def fed_run():
                 clusters, client_dict, cluster_servers, 
                 cluster_recorders, blockchain, consensus_blockchain,
                 num_threads, hotstuff_consensus, initial_super_nodes,
-                config
+                config, global_round
             )
         else:
             cluster_results = train_clusters_sequential(
                 clusters, client_dict, cluster_servers, 
                 cluster_recorders, blockchain, consensus_blockchain,
                 hotstuff_consensus, initial_super_nodes,
-                config
+                config, global_round
             )
         
         # 处理训练结果
@@ -913,6 +946,16 @@ def fed_run():
         print("\n区块链验证成功！")
     else:
         print("\n警告：区块链验证失败！")
+
+def deserialize_model_params(serialized_params: Dict[str, Any]) -> Dict[str, torch.Tensor]:
+    """反序列化模型参数"""
+    model_params = {}
+    for key, value in serialized_params.items():
+        if isinstance(value, list):  # 如果是列表（序列化的张量）
+            model_params[key] = torch.tensor(value)
+        else:
+            model_params[key] = value
+    return model_params
 
 if __name__ == "__main__":
     fed_run()
