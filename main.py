@@ -389,6 +389,70 @@ def train_cluster(args):
             
             # 将共识区块添加到链上
             consensus_blockchain.add_block(consensus_block)
+            print(f'簇 {cluster_id} 区块创建完成，共识验证通过')
+
+            # 保存子区块内容到JSON文件
+            sub_block_content = {
+                'basic_info': {
+                    'cluster_id': cluster_id,
+                    'round_num': consensus_block.round_num,
+                    'timestamp': consensus_block.timestamp,
+                    'hash': consensus_block.hash,
+                    'prev_hash': consensus_block.previous_hash
+                },
+                'transactions': [
+                    {
+                        'client_id': tx.client_id,
+                        'reputation': tx.reputation,
+                        'timestamp': tx.timestamp,
+                        'signature': tx.signature
+                    }
+                    for tx in consensus_block.transactions
+                ],
+                'super_nodes': [
+                    {
+                        'node_id': node['node_id'],
+                        'reputation': node['reputation'],
+                        'total_votes': node['total_votes'],
+                        'votes_received': [
+                            {
+                                'voter_id': vote['voter_id'],
+                                'weight': vote['weight'],
+                                'timestamp': vote['timestamp'],
+                                'signature': vote['signature']
+                            }
+                            for vote in node['votes_received']
+                        ]
+                    }
+                    for node in consensus_block.super_nodes
+                ],
+                'model_info': {
+                    'num_layers': len(consensus_block.model_params),
+                    'total_parameters': sum(np.array(param).size for param in consensus_block.model_params.values()),
+                    'layer_shapes': {
+                        key: np.array(param).shape 
+                        for key, param in consensus_block.model_params.items()
+                    }
+                }
+            }
+
+            # 创建保存路径
+            sub_block_dir = os.path.join(
+                config["system"]["res_root"],
+                'sub_blocks',
+                f'cluster_{cluster_id}'
+            )
+            os.makedirs(sub_block_dir, exist_ok=True)
+
+            # 保存区块内容到JSON文件
+            sub_block_filename = os.path.join(
+                sub_block_dir,
+                f'sub_block_round_{consensus_block.round_num}.json'
+            )
+            with open(sub_block_filename, 'w') as f:
+                json.dump(sub_block_content, f, indent=2, cls=PythonObjectEncoder)
+
+            print(f'子区块内容已保存到: {sub_block_filename}')
             
         else:
             print(f"簇 {cluster_id} 未能达成共识，使用所有节点进行聚合")
