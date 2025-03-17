@@ -62,8 +62,8 @@ class SubBlock:
             if self.hash[:difficulty] == target:
                 return
             
-            # 每1000次尝试打印一次进度
-            if i % 1000 == 0:
+            # 每100次尝试打印一次进度
+            if i % 100 == 0:
                 print(f"Mining progress: {i} attempts")
         
         print("Warning: Maximum mining attempts reached")
@@ -80,6 +80,43 @@ class SubBlock:
             'nonce': self.nonce
         }
 
+class BlockHeader:
+    """区块头类"""
+    def __init__(self,
+                 height: int,
+                 prev_hash: str,
+                 timestamp: float,
+                 merkle_root: str,
+                 nonce: int = 0):
+        self.height = height          # 区块高度
+        self.prev_hash = prev_hash    # 前一个区块的哈希
+        self.timestamp = timestamp    # 时间戳
+        self.merkle_root = merkle_root  # Merkle树根哈希
+        self.nonce = nonce           # 工作量证明的随机数
+        self.hash = self.calculate_hash()
+
+    def calculate_hash(self) -> str:
+        """计算区块头的哈希值"""
+        header_content = {
+            'height': self.height,
+            'prev_hash': self.prev_hash,
+            'timestamp': self.timestamp,
+            'merkle_root': self.merkle_root,
+            'nonce': self.nonce
+        }
+        header_string = json.dumps(header_content, sort_keys=True)
+        return hashlib.sha256(header_string.encode()).hexdigest()
+
+    def to_dict(self) -> Dict:
+        return {
+            'height': self.height,
+            'prev_hash': self.prev_hash,
+            'timestamp': self.timestamp,
+            'merkle_root': self.merkle_root,
+            'nonce': self.nonce,
+            'hash': self.hash
+        }
+
 class MainBlock:
     """主区块类"""
     def __init__(self,
@@ -87,69 +124,93 @@ class MainBlock:
                  prev_hash: str,
                  sub_blocks: List[SubBlock],
                  global_model_params: Dict[str, Any]):
-        self.timestamp = time.time()
-        self.round_num = round_num
-        self.prev_hash = prev_hash
-        self.sub_blocks_pointers = [block.hash for block in sub_blocks]
-        self.global_model_params = global_model_params
+        # 计算Merkle树根
+        self.merkle_root = self._calculate_merkle_root(sub_blocks)
+        
+        # 创建区块头
+        self.header = BlockHeader(
+            height=round_num,
+            prev_hash=prev_hash,
+            timestamp=time.time(),
+            merkle_root=self.merkle_root
+        )
+        
+        # 区块体
+        self.body = {
+            'sub_chain_cid': self._calculate_sub_chain_cid(sub_blocks),
+            'global_model_params': global_model_params,
+            'sub_blocks_pointers': [block.hash for block in sub_blocks]
+        }
         
         # 预计算所有哈希值
         self.global_model_params_hash = hashlib.sha256(
             json.dumps(global_model_params, sort_keys=True).encode()
         ).hexdigest()
-        self.sub_chain_cid = self.calculate_sub_chain_cid(sub_blocks)
-        self.nonce = 0
-        self.hash = self.calculate_hash()
+        
+        # 区块哈希就是区块头的哈希
+        self.hash = self.header.hash
 
-    def calculate_sub_chain_cid(self, sub_blocks: List[SubBlock]) -> str:
+    def _calculate_merkle_root(self, sub_blocks: List[SubBlock]) -> str:
+        """计算Merkle树根哈希"""
+        if not sub_blocks:
+            return hashlib.sha256('empty'.encode()).hexdigest()
+        
+        # 获取所有子区块的哈希作为叶子节点
+        leaves = [block.hash for block in sub_blocks]
+        
+        # 如果叶子节点数量为奇数，复制最后一个节点
+        if len(leaves) % 2 == 1:
+            leaves.append(leaves[-1])
+        
+        # 构建Merkle树
+        while len(leaves) > 1:
+            temp = []
+            for i in range(0, len(leaves), 2):
+                combined = leaves[i] + leaves[i+1]
+                temp.append(hashlib.sha256(combined.encode()).hexdigest())
+            leaves = temp
+            
+            # 如果剩余节点为奇数，复制最后一个节点
+            if len(leaves) % 2 == 1 and len(leaves) > 1:
+                leaves.append(leaves[-1])
+        
+        return leaves[0]
+
+    def _calculate_sub_chain_cid(self, sub_blocks: List[SubBlock]) -> str:
         """计算子区块链的CID"""
         sub_blocks_content = [block.to_dict() for block in sub_blocks]
         sub_blocks_str = json.dumps(sub_blocks_content, sort_keys=True)
         return hashlib.sha256(sub_blocks_str.encode()).hexdigest()
-
-    def calculate_hash(self) -> str:
-        """计算区块哈希值"""
-        block_content = {
-            'timestamp': self.timestamp,
-            'round_num': self.round_num,
-            'prev_hash': self.prev_hash,
-            'sub_blocks_pointers': self.sub_blocks_pointers,
-            'global_model_params_hash': self.global_model_params_hash,
-            'sub_chain_cid': self.sub_chain_cid,
-            'nonce': self.nonce
-        }
-        block_string = json.dumps(block_content, sort_keys=True)
-        return hashlib.sha256(block_string.encode()).hexdigest()
 
     def mine_block(self, difficulty: int):
         """挖掘区块"""
         target = '0' * difficulty
         max_attempts = 1000000  # 限制最大尝试次数
         
-        print(f"开始挖掘主区块（轮次 {self.round_num}）...")
+        print(f"开始挖掘主区块（高度 {self.header.height}）...")
         for i in range(max_attempts):
-            self.nonce = i
-            self.hash = self.calculate_hash()
+            self.header.nonce = i
+            self.header.hash = self.header.calculate_hash()
+            self.hash = self.header.hash
+            
             if self.hash[:difficulty] == target:
-                print(f"主区块挖掘成功（轮次 {self.round_num}）")
+                print(f"主区块挖掘成功（高度 {self.header.height}）")
                 return
             
-            # 每1000次尝试打印一次进度
-            if i % 1000 == 0:
+            # 每100次尝试打印一次进度
+            if i % 100 == 0:
                 print(f"主区块挖掘进度: {i} attempts")
         
-        print(f"警告：主区块（轮次 {self.round_num}）达到最大挖掘尝试次数")
+        print(f"警告：主区块（高度 {self.header.height}）达到最大挖掘尝试次数")
 
     def to_dict(self) -> Dict:
         return {
-            'timestamp': self.timestamp,
-            'round_num': self.round_num,
-            'prev_hash': self.prev_hash,
-            'hash': self.hash,
-            'sub_blocks_pointers': self.sub_blocks_pointers,
-            'global_model_params': self.global_model_params,
-            'sub_chain_cid': self.sub_chain_cid,
-            'nonce': self.nonce
+            'header': self.header.to_dict(),
+            'body': {
+                'sub_chain_cid': self.body['sub_chain_cid'],
+                'global_model_params': self.body['global_model_params'],
+                'sub_blocks_pointers': self.body['sub_blocks_pointers']
+            }
         }
 
 class BlockChain:
@@ -186,15 +247,13 @@ class BlockChain:
         prev_hash = '0' * 64 if not self.main_chain else self.main_chain[-1].hash
         sub_blocks = list(self.pending_sub_blocks.values())
         
-        print(f"开始创建主区块（轮次 {round_num}）...")
         try:
             new_block = MainBlock(round_num, prev_hash, sub_blocks, global_model_params)
             new_block.mine_block(self.difficulty)
             
             self.main_chain.append(new_block)
             self.pending_sub_blocks.clear()
-            
-            print(f"主区块创建完成（轮次 {round_num}）")
+
             return new_block
             
         except Exception as e:
@@ -227,13 +286,65 @@ class BlockChain:
         return True
 
     def get_chain_info(self) -> Dict:
-        """获取区块链信息"""
+        """获取区块链详细信息"""
         return {
-            'main_chain_length': len(self.main_chain),
-            'sub_chains_info': {
-                cluster_id: len(chain)
+            'main_chain': {
+                'length': len(self.main_chain),
+                'latest_block': {
+                    'height': self.main_chain[-1].header.height if self.main_chain else None,
+                    'hash': self.main_chain[-1].hash if self.main_chain else None,
+                    'timestamp': self.main_chain[-1].header.timestamp if self.main_chain else None,
+                    'merkle_root': self.main_chain[-1].header.merkle_root if self.main_chain else None,
+                    'num_sub_blocks': len(self.main_chain[-1].body['sub_blocks_pointers']) if self.main_chain else 0
+                } if self.main_chain else None,
+                'blocks_summary': [
+                    {
+                        'height': block.header.height,
+                        'hash': block.hash,
+                        'prev_hash': block.header.prev_hash,
+                        'num_sub_blocks': len(block.body['sub_blocks_pointers'])
+                    }
+                    for block in self.main_chain
+                ]
+            },
+            'sub_chains': {
+                cluster_id: {
+                    'length': len(chain),
+                    'latest_block': {
+                        'round_num': chain[-1].round_num if chain else None,
+                        'hash': chain[-1].hash if chain else None,
+                        'timestamp': chain[-1].timestamp if chain else None,
+                        'num_clients': len(chain[-1].clients_info) if chain else 0
+                    } if chain else None,
+                    'blocks_summary': [
+                        {
+                            'round_num': block.round_num,
+                            'hash': block.hash,
+                            'prev_hash': block.prev_hash,
+                            'num_clients': len(block.clients_info)
+                        }
+                        for block in chain
+                    ]
+                }
                 for cluster_id, chain in self.sub_chains.items()
             },
-            'latest_main_block_hash': self.main_chain[-1].hash if self.main_chain else None,
-            'pending_sub_blocks': list(self.pending_sub_blocks.keys())
+            'pending_sub_blocks': {
+                cluster_id: {
+                    'round_num': block.round_num,
+                    'hash': block.hash,
+                    'timestamp': block.timestamp,
+                    'num_clients': len(block.clients_info)
+                }
+                for cluster_id, block in self.pending_sub_blocks.items()
+            },
+            'statistics': {
+                'total_main_blocks': len(self.main_chain),
+                'total_sub_chains': len(self.sub_chains),
+                'total_pending_blocks': len(self.pending_sub_blocks),
+                'sub_chains_lengths': {
+                    cluster_id: len(chain)
+                    for cluster_id, chain in self.sub_chains.items()
+                },
+                'difficulty': self.difficulty
+            }
         } 

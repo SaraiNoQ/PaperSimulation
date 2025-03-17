@@ -776,22 +776,7 @@ def fed_run():
                 round_num=global_round,
                 global_model_params=serializable_global_params
             )
-            # 启动共识过程
-            hotstuff_consensus.start_consensus(main_block.hash)
-            # 序列化super_nodes
-            serialized_main_spuer_nodes = serialize_super_nodes(initial_super_nodes)
-            # 等待共识达成
-            consensus_reached = False
-            for node in serialized_main_spuer_nodes:
-                prepare_msg = HotStuffMessage(
-                    sender_id=node['node_id'],
-                    phase="prepare",
-                    block_hash=main_block.hash,
-                    view_number=hotstuff_consensus.view_number
-                )
-                hotstuff_consensus.receive_prepare(prepare_msg)
-            
-            print('主区块创建完成，共识验证通过')
+            print('主区块创建完成')
         except Exception as e:
             print(f"创建主区块时出错: {str(e)}")
             raise e
