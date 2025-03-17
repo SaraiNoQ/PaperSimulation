@@ -10,7 +10,7 @@ system:
   imbalance_factor: 0.6
   similarity_method: "wasserstein"
   concurrent: false
-  malicious_ratio: 0.3
+  malicious_ratio: 0.5
   attack_type: "zero"
 
 client:

@@ -249,7 +249,7 @@ def train_cluster(args):
                     # 恶意节点的loss设置为一个较小的值，以试图欺骗系统
                     loss = 0.1
 
-                # 增加数据量
+                # 记录数据量
                 data_num += n_data
                 
                 # 创建交易对象，包含模型更新
@@ -268,7 +268,6 @@ def train_cluster(args):
                 # 确保状态字典中的所有张量都在正确的设备上
                 state_dict = {k: v.to(device) for k, v in state_dict.items()}
                 client_states[client_id] = (state_dict, int(n_data), float(loss))
-                cluster_server.rec(client_id, state_dict, n_data, loss)
                 
                 # 将客户端模型移回CPU并清理内存
                 client_dict[client_id].model = client_dict[client_id].model.cpu()
@@ -307,16 +306,32 @@ def train_cluster(args):
         
         # 为每个超级节点创建共识实例
         super_node_consensus = {}
-        for super_node in super_nodes:
-            node_id = super_node.node_id
-            model_params = client_states[node_id][0]  # 获取超级节点的模型参数
-            super_node_consensus[node_id] = SuperNodeConsensus(node_id, model_params)
+        try:
+            for super_node in super_nodes:
+                node_id = super_node.node_id
+                if node_id not in client_states:
+                    print(f"警告: 超级节点 {node_id} 的状态未找到，跳过该节点")
+                    continue
+                    
+                model_params = client_states[node_id][0]  # 获取超级节点的模型参数
+                super_node_consensus[node_id] = SuperNodeConsensus(node_id, model_params)
+                
+                # 验证工作节点的模型
+                if worker_models:  # 确保有工作节点模型可供验证
+                    super_node_consensus[node_id].validate_worker_models(worker_models)
+                else:
+                    print(f"警告: 没有工作节点模型供超级节点 {node_id} 验证")
             
-            # 验证工作节点的模型
-            super_node_consensus[node_id].validate_worker_models(worker_models)
-        
-        # 创建增强版HotStuff共识实例
-        enhanced_consensus = EnhancedHotStuffConsensus(super_node_consensus)
+            # 检查是否有足够的超级节点参与共识
+            if not super_node_consensus:
+                raise Exception("没有有效的超级节点可以参与共识")
+            
+            # 创建增强版HotStuff共识实例
+            enhanced_consensus = EnhancedHotStuffConsensus(super_node_consensus)
+            
+        except Exception as e:
+            print(f"创建超级节点共识实例时出错: {str(e)}")
+            raise e
         
         # 创建初始区块（不包含聚合结果）
         initial_block = consensus_blockchain.create_sub_block(
@@ -333,10 +348,35 @@ def train_cluster(args):
         if consensus_reached:
             print(f"簇 {cluster_id} 达成共识，Leader: {leader_id}")
             
-            # 进行模型聚合
+            # 获取达成共识的区块中记录的可信节点ID
+            trusted_nodes = set()
+            for node_id, super_node in super_node_consensus.items():
+                if super_node.validate_block(initial_block):
+                    trusted_nodes.update(super_node.trusted_nodes)
+            
+            print(f"\n使用可信节点进行聚合:")
+            print(f"- 可信节点数量: {len(trusted_nodes)}")
+            print(f"- 可信节点列表: {sorted(list(trusted_nodes))}")
+            
+            # 清空服务器当前的客户端状态
+            cluster_server.flush()
+            
+            # 只记录可信节点的模型参数到服务器
+            trusted_data_num = 0
+            for client_id, (state_dict, n_data, loss) in client_states.items():
+                if client_id in trusted_nodes:
+                    # 使用rec方法记录可信节点的信息
+                    cluster_server.rec(client_id, state_dict, n_data, loss)
+                    trusted_data_num += n_data
+            
+            # 更新总数据量为可信节点的数据量
+            data_num = trusted_data_num
+            print(f"- 可信节点总数据量: {data_num}")
+            
+            # 进行模型聚合（只使用可信节点的参数）
             cluster_server.select_clients()
             cluster_global_state, avg_loss, _ = cluster_server.agg()
-            
+
             # 更新区块中的模型参数
             serializable_params = serialize_model_params(cluster_global_state)
             consensus_block = consensus_blockchain.create_sub_block(
@@ -351,8 +391,19 @@ def train_cluster(args):
             consensus_blockchain.add_block(consensus_block)
             
         else:
-            print(f"簇 {cluster_id} 未能达成共识，直接进行聚合")
-            # 直接进行聚合
+            print(f"簇 {cluster_id} 未能达成共识，使用所有节点进行聚合")
+            # 清空服务器当前的客户端状态
+            cluster_server.flush()
+            
+            # 记录所有节点的信息和计算总数据量
+            data_num = 0
+            for client_id, (state_dict, n_data, loss) in client_states.items():
+                cluster_server.rec(client_id, state_dict, n_data, loss)
+                data_num += n_data
+            
+            print(f"- 使用所有节点总数据量: {data_num}")
+            
+            # 使用所有节点的模型参数进行聚合
             cluster_server.select_clients()
             cluster_global_state, avg_loss, _ = cluster_server.agg()
         
@@ -374,6 +425,7 @@ def train_cluster(args):
             # 使用簇的准确率作为客户端的准确率
             cluster_recorder.res['clients'][client_id]['iid_accuracy'].append(float(accuracy))
 
+        # 簇内训练完毕，并且完成记录后，清空服务器当前的客户端状态
         cluster_server.flush()
 
         # 序列化全局模型

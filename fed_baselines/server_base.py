@@ -18,7 +18,7 @@ class FedServer(object):
         self.selected_clients = []
         # batch size for testing
         self._batch_size = 200
-        self.client_list = client_list
+        self.client_list = client_list  # 初始客户端列表
 
         # Initialize the test dataset
         self.testset = None
@@ -72,13 +72,17 @@ class FedServer(object):
 
     def select_clients(self, connection_ratio=1):
         """
-        Server selects a fraction of clients.
+        Server selects clients from the currently recorded clients.
         :param connection_ratio: connection ratio in the clients
         """
+        # 使用当前记录的客户端状态中的客户端，而不是初始化时的client_list
+        current_clients = list(self.client_state.keys())
+        
         # select a fraction of clients
         self.selected_clients = []
         self.n_data = 0
-        for client_id in self.client_list:
+        
+        for client_id in current_clients:
             b = np.random.binomial(np.ones(1).astype(int), connection_ratio)
             if b:
                 self.selected_clients.append(client_id)
@@ -138,14 +142,12 @@ class FedServer(object):
         :param n_data: Number of local data points in the client k
         :param loss: Loss of local training in the client k
         """
-        self.n_data = self.n_data + n_data
+        # 直接记录客户端状态，不需要检查是否在初始client_list中
         self.client_state[name] = {}
-        self.client_n_data[name] = {}
-
-        self.client_state[name].update(state_dict)
         self.client_n_data[name] = n_data
-        self.client_loss[name] = {}
         self.client_loss[name] = loss
+        self.client_state[name].update(state_dict)
+        self.n_data += n_data
 
     def flush(self):
         """

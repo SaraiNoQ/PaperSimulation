@@ -584,18 +584,40 @@ class SuperNodeConsensus:
         for range_name, count in score_ranges.items():
             print(f"- {range_name}: {count}个节点")
     
-    def validate_block(self, block: Block) -> bool:
-        """验证区块中的节点是否可信"""
-        block_nodes = set(block.clients_info.keys())
-        common_nodes = block_nodes.intersection(self.trusted_nodes)
+    def validate_block(self, block):
+        """
+        验证区块是否通过共识
         
-        validation_result = len(common_nodes) > len(block_nodes) / 2
-        print(f"\n超级节点 {self.node_id} 验证区块:")
-        print(f"- 区块中的节点数: {len(block_nodes)}")
-        print(f"- 可信节点数: {len(common_nodes)}")
-        print(f"- 验证结果: {'通过' if validation_result else '拒绝'}")
+        Args:
+            block: 待验证的区块
+            
+        Returns:
+            bool: 如果区块中的可信节点列表与本节点的可信节点列表有足够重叠则返回True
+        """
+        # 获取Leader提议的区块中的可信节点列表
+        leader_trusted_nodes = set()
+        for transaction in block.transactions:
+            if transaction.client_id in self.trusted_nodes:
+                leader_trusted_nodes.add(transaction.client_id)
         
-        return validation_result
+        # 计算本节点的可信节点列表与Leader提议的可信节点列表的交集大小
+        common_trusted_nodes = self.trusted_nodes.intersection(leader_trusted_nodes)
+        
+        # 计算重叠率
+        # 使用本节点的可信节点列表长度作为基准
+        overlap_ratio = len(common_trusted_nodes) / len(self.trusted_nodes) if self.trusted_nodes else 0
+        
+        print(f"超级节点 {self.node_id} 验证区块:")
+        print(f"- 本节点可信节点数量: {len(self.trusted_nodes)}")
+        print(f"- Leader提议的可信节点数量: {len(leader_trusted_nodes)}")
+        print(f"- 共同可信节点数量: {len(common_trusted_nodes)}")
+        print(f"- 重叠率: {overlap_ratio:.2f}")
+        
+        # 如果重叠率大于等于0.5（即有一半及以上的节点重叠），则通过验证
+        is_valid = overlap_ratio >= 0.5
+        print(f"- 验证结果: {'通过' if is_valid else '未通过'}")
+        
+        return is_valid
 
 class EnhancedHotStuffConsensus(HotStuffConsensus):
     """增强版HotStuff共识"""
