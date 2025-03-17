@@ -10,6 +10,8 @@ system:
   imbalance_factor: 0.6
   similarity_method: "wasserstein"
   concurrent: false
+  malicious_ratio: 0.3
+  attack_type: "zero"
 
 client:
   fed_algo: "FedAvg"

@@ -26,7 +26,8 @@ from typing import Dict, Any, List
 from blockchain.block_structure import BlockChain, ClientInfo
 from blockchain.consensus import (
     DPoSElection, HotStuffConsensus, Vote, SuperNode, 
-    Transaction, HotStuffMessage, ConsensusBlockChain, Block as ConsensusBlock
+    Transaction, HotStuffMessage, ConsensusBlockChain, Block as ConsensusBlock,
+    ModelValidator, SuperNodeConsensus, EnhancedHotStuffConsensus
 )
 
 # 用于将python对象序列化为json对象
@@ -181,11 +182,32 @@ def run_consensus(hotstuff_consensus: HotStuffConsensus,
     
     return False
 
+def simulate_malicious_update(model_params: Dict[str, torch.Tensor], attack_type: str = "zero") -> Dict[str, torch.Tensor]:
+    """
+    模拟恶意节点的模型更新
+    
+    Args:
+        model_params: 原始模型参数
+        attack_type: 攻击类型，"zero"表示全0参数，"random"表示随机参数
+    
+    Returns:
+        Dict[str, torch.Tensor]: 被污染的模型参数
+    """
+    malicious_params = {}
+    for key, param in model_params.items():
+        if attack_type == "zero":
+            # 生成全0参数
+            malicious_params[key] = torch.zeros_like(param)
+        else:  # random
+            # 生成随机参数
+            malicious_params[key] = torch.randn_like(param)
+    return malicious_params
+
 def train_cluster(args):
     """
     单个簇的训练函数
     """
-    cluster_id, members, client_dict, cluster_server, cluster_recorder, blockchain, consensus_blockchain, hotstuff_consensus, super_nodes = args
+    cluster_id, members, client_dict, cluster_server, cluster_recorder, blockchain, consensus_blockchain, hotstuff_consensus, super_nodes, config = args
     
     try:
         # 获取设备信息
@@ -202,6 +224,10 @@ def train_cluster(args):
         client_transactions = []  # 存储客户端交易
         data_num = 0
         
+        # 获取恶意节点配置
+        malicious_ratio = config["system"].get("malicious_ratio", 0.0)
+        attack_type = config["system"].get("attack_type", "zero")
+        
         for client_id in members:
             try:
                 # 获取簇内服务器的全局模型
@@ -215,6 +241,13 @@ def train_cluster(args):
                 
                 # 本地训练得到模型参数、数据量和loss
                 state_dict, n_data, loss = client_dict[client_id].train()
+
+                # 模拟恶意节点攻击
+                if random.random() < malicious_ratio:
+                    print(f"客户端 {client_id} 被检测为恶意节点，执行{attack_type}攻击")
+                    state_dict = simulate_malicious_update(state_dict, attack_type)
+                    # 恶意节点的loss设置为一个较小的值，以试图欺骗系统
+                    loss = 0.1
 
                 # 增加数据量
                 data_num += n_data
@@ -247,30 +280,82 @@ def train_cluster(args):
                 print(f"Error training client {client_id} in cluster {cluster_id}: {str(e)}")
                 continue
 
+        # 计算超级节点数量（至少5个，且为总节点数的20%）
+        num_super_nodes = max(5, int(len(members) * 0.2))
+        
         # 执行DPoS选举
         dpos_election = DPoSElection(
             clients_info={
                 tx.client_id: tx.reputation 
                 for tx in client_transactions
-            }
+            },
+            num_super_nodes=num_super_nodes
         )
         dpos_election.nominate_candidates()
         dpos_election.vote()
         
         # 选举超级节点
         super_nodes = dpos_election.elect_super_nodes()
-        
-        # 选择leader节点
-        leader_id = dpos_election.select_leader()
         super_node_ids = [node.node_id for node in super_nodes]
         
-        # 初始化HotStuff共识
-        hotstuff_consensus = HotStuffConsensus(leader_id, super_node_ids)
-
-        # 簇内服务器聚合模型
-        cluster_server.select_clients()
-        cluster_global_state, avg_loss, _ = cluster_server.agg()
-
+        # 收集所有工作节点的模型参数
+        worker_models = {
+            client_id: state_dict
+            for client_id, (state_dict, _, _) in client_states.items()
+            if client_id not in super_node_ids
+        }
+        
+        # 为每个超级节点创建共识实例
+        super_node_consensus = {}
+        for super_node in super_nodes:
+            node_id = super_node.node_id
+            model_params = client_states[node_id][0]  # 获取超级节点的模型参数
+            super_node_consensus[node_id] = SuperNodeConsensus(node_id, model_params)
+            
+            # 验证工作节点的模型
+            super_node_consensus[node_id].validate_worker_models(worker_models)
+        
+        # 创建增强版HotStuff共识实例
+        enhanced_consensus = EnhancedHotStuffConsensus(super_node_consensus)
+        
+        # 创建初始区块（不包含聚合结果）
+        initial_block = consensus_blockchain.create_sub_block(
+            cluster_id=int(cluster_id),
+            round_num=len(cluster_recorder.res['server']['iid_accuracy']),
+            model_params={},  # 暂时为空
+            transactions=client_transactions,
+            super_nodes=[node.to_dict() for node in super_nodes]
+        )
+        
+        # 运行共识
+        consensus_reached, leader_id = enhanced_consensus.run_consensus(initial_block)
+        
+        if consensus_reached:
+            print(f"簇 {cluster_id} 达成共识，Leader: {leader_id}")
+            
+            # 进行模型聚合
+            cluster_server.select_clients()
+            cluster_global_state, avg_loss, _ = cluster_server.agg()
+            
+            # 更新区块中的模型参数
+            serializable_params = serialize_model_params(cluster_global_state)
+            consensus_block = consensus_blockchain.create_sub_block(
+                cluster_id=int(cluster_id),
+                round_num=len(cluster_recorder.res['server']['iid_accuracy']),
+                model_params=serializable_params,
+                transactions=client_transactions,
+                super_nodes=[node.to_dict() for node in super_nodes]
+            )
+            
+            # 将共识区块添加到链上
+            consensus_blockchain.add_block(consensus_block)
+            
+        else:
+            print(f"簇 {cluster_id} 未能达成共识，直接进行聚合")
+            # 直接进行聚合
+            cluster_server.select_clients()
+            cluster_global_state, avg_loss, _ = cluster_server.agg()
+        
         # 簇内测试和记录
         accuracy = cluster_server.test()
         
@@ -343,7 +428,7 @@ def train_cluster(args):
         torch.cuda.empty_cache()
         raise e
 
-def train_clusters_sequential(clusters, client_dict, cluster_servers, cluster_recorders, blockchain, consensus_blockchain, hotstuff_consensus, super_nodes):
+def train_clusters_sequential(clusters, client_dict, cluster_servers, cluster_recorders, blockchain, consensus_blockchain, hotstuff_consensus, super_nodes, config):
     """
     顺序训练所有簇
     """
@@ -359,7 +444,8 @@ def train_clusters_sequential(clusters, client_dict, cluster_servers, cluster_re
                                   blockchain,
                                   consensus_blockchain,
                                   hotstuff_consensus,
-                                  super_nodes))
+                                  super_nodes,
+                                  config))
             cluster_results.append(result)
             
             # 在每个簇训练后清理GPU内存
@@ -371,7 +457,7 @@ def train_clusters_sequential(clusters, client_dict, cluster_servers, cluster_re
             torch.cuda.empty_cache()
     return cluster_results
 
-def train_clusters_concurrent(clusters, client_dict, cluster_servers, cluster_recorders, blockchain, consensus_blockchain, num_threads, hotstuff_consensus, super_nodes):
+def train_clusters_concurrent(clusters, client_dict, cluster_servers, cluster_recorders, blockchain, consensus_blockchain, num_threads, hotstuff_consensus, super_nodes, config):
     """
     并发训练所有簇
     """
@@ -380,7 +466,8 @@ def train_clusters_concurrent(clusters, client_dict, cluster_servers, cluster_re
         # 准备每个簇的训练参数
         cluster_args = [
             (cluster_id, members, client_dict, cluster_servers[cluster_id], 
-             cluster_recorders[cluster_id], blockchain, consensus_blockchain, hotstuff_consensus, super_nodes)
+             cluster_recorders[cluster_id], blockchain, consensus_blockchain, 
+             hotstuff_consensus, super_nodes, config)
             for cluster_id, members in clusters.items()
         ]
         
@@ -590,13 +677,15 @@ def fed_run():
             cluster_results = train_clusters_concurrent(
                 clusters, client_dict, cluster_servers, 
                 cluster_recorders, blockchain, consensus_blockchain,
-                num_threads, hotstuff_consensus, initial_super_nodes
+                num_threads, hotstuff_consensus, initial_super_nodes,
+                config
             )
         else:
             cluster_results = train_clusters_sequential(
                 clusters, client_dict, cluster_servers, 
                 cluster_recorders, blockchain, consensus_blockchain,
-                hotstuff_consensus, initial_super_nodes
+                hotstuff_consensus, initial_super_nodes,
+                config
             )
         
         # 处理训练结果

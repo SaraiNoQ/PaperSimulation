@@ -2,7 +2,10 @@ import hashlib
 import time
 import json
 import random
-from typing import Dict, List, Any, Set, Tuple
+from typing import Dict, List, Any, Set, Tuple, Optional
+import numpy as np
+from scipy.stats import wasserstein_distance
+import torch
 
 class Vote:
     """投票类，用于DPoS选举"""
@@ -492,3 +495,171 @@ class ConsensusBlockChain:
         )
         
         return block
+
+class ModelValidator:
+    """模型验证器，用于验证模型参数的相似度"""
+    def __init__(self, super_node_model: Dict[str, torch.Tensor]):
+        self.super_node_model = super_node_model
+        
+    def calculate_similarity_scores(self, worker_models: Dict[str, Dict[str, torch.Tensor]]) -> Dict[str, float]:
+        """计算模型相似度得分"""
+        scores = {}
+        for worker_id, worker_model in worker_models.items():
+            # 计算Wasserstein距离
+            distance = 0
+            for key in self.super_node_model:
+                if key in worker_model:
+                    super_param = self.super_node_model[key]
+                    worker_param = worker_model[key]
+                    
+                    # 将参数展平并转换为numpy数组
+                    super_flat = super_param.cpu().detach().numpy().flatten()
+                    worker_flat = worker_param.cpu().detach().numpy().flatten()
+                    
+                    # 计算Wasserstein距离
+                    distance += wasserstein_distance(
+                        super_flat, worker_flat
+                    )
+            
+            # 将距离转换为相似度得分（距离越小，得分越高）
+            scores[worker_id] = 1.0 / (1.0 + distance)
+        
+        return scores
+
+class SuperNodeConsensus:
+    """超级节点共识类"""
+    def __init__(self, node_id: str, model_params: Dict[str, torch.Tensor]):
+        self.node_id = node_id
+        self.model_params = model_params
+        self.validator = ModelValidator(model_params)
+        self.trusted_nodes: Set[str] = set()
+        self.current_block: Optional[Block] = None
+    
+    def validate_worker_models(self, worker_models: Dict[str, Dict[str, torch.Tensor]]) -> None:
+        """验证工作节点的模型并选择可信节点"""
+        print(f"\n超级节点 {self.node_id} 开始验证工作节点模型...")
+        
+        # 计算相似度得分
+        scores = self.validator.calculate_similarity_scores(worker_models)
+        
+        # 对得分排序
+        sorted_scores = sorted(scores.items(), key=lambda x: x[1])
+        
+        # 选择中间2/3的节点
+        n = len(sorted_scores)
+        start_idx = n // 6
+        end_idx = n - (n // 6)
+        
+        # 记录可信节点
+        self.trusted_nodes = {node_id for node_id, _ in sorted_scores[start_idx:end_idx]}
+        
+        # 输出验证结果
+        print(f"超级节点 {self.node_id} 验证完成:")
+        print(f"- 总工作节点数: {len(worker_models)}")
+        print(f"- 可信节点数: {len(self.trusted_nodes)}")
+        print(f"- 可信节点列表: {sorted(list(self.trusted_nodes))}")
+        
+        # 输出得分分布
+        print("\n得分分布:")
+        score_ranges = {
+            "高分(0.8-1.0)": 0,
+            "中高分(0.6-0.8)": 0,
+            "中分(0.4-0.6)": 0,
+            "中低分(0.2-0.4)": 0,
+            "低分(0.0-0.2)": 0
+        }
+        
+        for _, score in scores.items():
+            if score >= 0.8:
+                score_ranges["高分(0.8-1.0)"] += 1
+            elif score >= 0.6:
+                score_ranges["中高分(0.6-0.8)"] += 1
+            elif score >= 0.4:
+                score_ranges["中分(0.4-0.6)"] += 1
+            elif score >= 0.2:
+                score_ranges["中低分(0.2-0.4)"] += 1
+            else:
+                score_ranges["低分(0.0-0.2)"] += 1
+        
+        for range_name, count in score_ranges.items():
+            print(f"- {range_name}: {count}个节点")
+    
+    def validate_block(self, block: Block) -> bool:
+        """验证区块中的节点是否可信"""
+        block_nodes = set(block.clients_info.keys())
+        common_nodes = block_nodes.intersection(self.trusted_nodes)
+        
+        validation_result = len(common_nodes) > len(block_nodes) / 2
+        print(f"\n超级节点 {self.node_id} 验证区块:")
+        print(f"- 区块中的节点数: {len(block_nodes)}")
+        print(f"- 可信节点数: {len(common_nodes)}")
+        print(f"- 验证结果: {'通过' if validation_result else '拒绝'}")
+        
+        return validation_result
+
+class EnhancedHotStuffConsensus(HotStuffConsensus):
+    """增强版HotStuff共识"""
+    def __init__(self, super_nodes: Dict[str, SuperNodeConsensus], 
+                 timeout: float = 30.0, max_retries: int = 5):
+        self.super_nodes = super_nodes
+        self.current_leader = None
+        self.timeout = timeout
+        self.max_retries = max_retries
+        self.tried_leaders: Set[str] = set()
+    
+    def select_new_leader(self) -> Optional[str]:
+        """选择新的Leader"""
+        available_leaders = set(self.super_nodes.keys()) - self.tried_leaders
+        if not available_leaders:
+            return None
+        new_leader = random.choice(list(available_leaders))
+        print(f"\n选择新的Leader节点: {new_leader}")
+        print(f"- 剩余可选Leader数: {len(available_leaders) - 1}")
+        return new_leader
+    
+    def run_consensus(self, block: Block) -> Tuple[bool, str]:
+        """运行共识流程"""
+        round_count = 0
+        print("\n开始增强版HotStuff共识流程...")
+        print(f"- 总超级节点数: {len(self.super_nodes)}")
+        print(f"- 需要票数: {len(self.super_nodes) * 2 // 3 + 1}")
+        
+        while len(self.tried_leaders) < len(self.super_nodes):
+            round_count += 1
+            print(f"\n=== 共识轮次 {round_count} ===")
+            
+            # 选择新的Leader
+            self.current_leader = self.select_new_leader()
+            if not self.current_leader:
+                print("没有可用的Leader节点，共识失败")
+                break
+                
+            self.tried_leaders.add(self.current_leader)
+            
+            # 收集投票
+            print(f"\nLeader节点 {self.current_leader} 开始收集投票...")
+            votes = {}
+            for node_id, super_node in self.super_nodes.items():
+                vote_result = super_node.validate_block(block)
+                if vote_result:
+                    votes[node_id] = True
+            
+            # 检查是否达到2/3多数
+            vote_threshold = len(self.super_nodes) * 2 / 3
+            print(f"\n投票结果统计:")
+            print(f"- 同意票数: {len(votes)}")
+            print(f"- 所需票数: {vote_threshold}")
+            print(f"- 投票结果: {'通过' if len(votes) >= vote_threshold else '未通过'}")
+            
+            if len(votes) >= vote_threshold:
+                print(f"\n共识达成！")
+                print(f"- 最终Leader: {self.current_leader}")
+                print(f"- 总轮次: {round_count}")
+                return True, self.current_leader
+            else:
+                print(f"\n本轮共识未达成，切换Leader重试")
+        
+        print(f"\n共识最终失败")
+        print(f"- 尝试轮次: {round_count}")
+        print(f"- 已尝试所有可能的Leader节点")
+        return False, ""
