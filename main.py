@@ -13,14 +13,13 @@ import torch
 import time
 import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor
-from queue import Queue
 
 from fed_baselines.client_base import FedClient
 from fed_baselines.server_base import FedServer
 
 from postprocessing.recorder import Recorder
 from preprocessing.baselines_dataloader import divide_data, divide_noniid_data
-from utils.similarity_cal import WassersteinSimilarity, PearsonSimilarity, JSDistanceSimilarity, perform_spectral_clustering, visualize_clustering_results
+from utils.similarity_cal import WassersteinSimilarity, PearsonSimilarity, JSDistanceSimilarity, perform_spectral_clustering, visualize_clustering_results, calculate_reputation_by_similarity
 
 from typing import Dict, Any, List
 from blockchain.block_structure import BlockChain, ClientInfo
@@ -49,50 +48,6 @@ def fed_args():
 
     args = parser.parse_args()
     return args
-
-def calculate_reputation(client_id: str, global_model_params: Dict[str, torch.Tensor], 
-                       client_model_params: Dict[str, torch.Tensor], 
-                       old_reputation: float = 50.0) -> float:
-    """计算客户端信誉值
-    
-    Args:
-        client_id: 客户端ID
-        global_model_params: 簇内全局模型参数（median）
-        client_model_params: 客户端上传的模型参数
-        old_reputation: 历史信誉值，默认为50
-        
-    Returns:
-        float: 更新后的信誉值
-    """
-    # 确保所有张量在同一设备上
-    device = next(iter(global_model_params.values())).device
-    
-    # 计算模型参数差异
-    total_diff = 0
-    total_params = 0
-    for key in global_model_params:
-        if key in client_model_params:
-            # 确保两个张量在同一设备上
-            global_param = global_model_params[key].to(device)
-            client_param = client_model_params[key].to(device)
-            
-            # 计算参数差异
-            diff = torch.abs(client_param - global_param)
-            total_diff += torch.sum(diff).item()
-            total_params += diff.numel()
-    
-    # 计算平均差异
-    avg_diff = total_diff / total_params if total_params > 0 else float('inf')
-    
-    # 计算得分，使用指数衰减
-    k = 0.1  # 衰减系数，可以根据需要调整
-    score = 100 * np.exp(-k * avg_diff)
-    
-    # 更新信誉值
-    alpha = 0.7  # 平滑因子，可以根据需要调整
-    reputation = alpha * old_reputation + (1 - alpha) * score  # 将score归一化到[0,100]
-    
-    return float(reputation)
 
 def serialize_model_params(model_params: Dict[str, torch.Tensor]) -> Dict[str, Any]:
     """序列化模型参数"""
@@ -223,10 +178,46 @@ def simulate_malicious_update(model_params: Dict[str, torch.Tensor], attack_type
             malicious_params[key] = torch.randn_like(param)
     return malicious_params
 
+def get_historical_reputations(cluster_id: int, round_num: int, res_root: str) -> Dict[str, float]:
+    """
+    从历史JSON文件中获取指定簇和轮次的历史信誉值
+    
+    Args:
+        cluster_id: 簇的ID
+        round_num: 训练轮次
+        res_root: 结果根目录路径
+    
+    Returns:
+        Dict[str, float]: 客户端ID到信誉值的映射
+    """
+    try:
+        # 构建JSON文件路径
+        sub_block_dir = os.path.join(res_root, 'sub_blocks', f'cluster_{cluster_id}')
+        sub_block_file = os.path.join(sub_block_dir, f'sub_block_round_{round_num}.json')
+        
+        # 检查文件是否存在
+        if not os.path.exists(sub_block_file):
+            print(f"警告: 未找到历史信誉值文件 {sub_block_file}")
+            return {}
+            
+        # 读取JSON文件
+        with open(sub_block_file, 'r') as f:
+            block_data = json.load(f)
+            
+        # 从transactions中提取信誉值
+        historical_reputations = {
+            tx['client_id']: tx['reputation']
+            for tx in block_data['transactions']
+        }
+        
+        return historical_reputations
+        
+    except Exception as e:
+        print(f"读取历史信誉值时出错: {str(e)}")
+        return {}
+
 def train_cluster(args):
-    """
-    单个簇的训练函数
-    """
+    """单个簇的训练函数"""
     cluster_id, members, client_dict, cluster_server, cluster_recorder, blockchain, consensus_blockchain, hotstuff_consensus, super_nodes, config, global_round = args
     
     try:
@@ -236,8 +227,14 @@ def train_cluster(args):
         # 将服务器模型移动到GPU
         cluster_server.model = cluster_server.model.to(device)
         
-        # 获取簇内服务器的全局模型参数（训练前）
-        old_model_params = {k: v.clone().to(device) for k, v in cluster_server.state_dict().items()}
+        # 获取上一轮的信誉值
+        previous_reputations = {}
+        if global_round > 0:  # 如果不是第一轮
+            previous_reputations = get_historical_reputations(
+                cluster_id=cluster_id,
+                round_num=global_round - 1,  # 获取上一轮的信誉值
+                res_root=config["system"]["res_root"]
+            )
         
         # 簇内每个节点进行本地训练
         client_states = {}
@@ -272,15 +269,12 @@ def train_cluster(args):
                 # 记录数据量
                 data_num += n_data
                 
-                # 创建交易对象，包含模型更新
+                # 创建交易对象，包含模型参数
                 transaction = Transaction(
                     client_id=client_id,
-                    model_update=serialize_model_params(state_dict),
-                    model_params=state_dict,  # 添加原始模型参数
-                    reputation=50.0 if global_round == 0 else next(
-                        (tx.reputation for tx in client_transactions if tx.client_id == client_id), 
-                        50.0
-                    )  # 使用历史信誉值或初始值
+                    model_params=state_dict,  # 直接传入原始模型参数
+                    reputation=50.0 if global_round == 0 else previous_reputations.get(client_id, 50.0)
+                    # 如果是第一轮或找不到历史信誉值，使用默认值50.0
                 )
                 client_transactions.append(transaction)
                 
@@ -398,16 +392,16 @@ def train_cluster(args):
 
             # 更新每个客户端的信誉值
             for tx in client_transactions:
-                if tx.client_id in trusted_nodes:
-                    # 计算新的信誉值
-                    new_reputation = calculate_reputation(
-                        tx.client_id,
-                        cluster_global_state,  # 簇内全局模型
-                        tx.model_params,       # 客户端原始模型参数
-                        tx.reputation          # 当前信誉值
-                    )
-                    # 更新交易中的信誉值
-                    tx.update_reputation(new_reputation)
+                
+                # 计算新的信誉值
+                new_reputation = calculate_reputation_by_similarity(
+                    tx.client_id,
+                    cluster_global_state,  # 簇内全局模型
+                    client_transactions,   # 传入整个交易列表
+                    tx.reputation         # 当前信誉值
+                )
+                # 更新交易中的信誉值
+                tx.update_reputation(new_reputation)
 
             # 更新区块中的模型参数
             serializable_params = serialize_model_params(cluster_global_state)
@@ -415,7 +409,7 @@ def train_cluster(args):
                 cluster_id=int(cluster_id),
                 round_num=len(cluster_recorder.res['server']['iid_accuracy']),
                 model_params=serializable_params,
-                transactions=client_transactions,
+                transactions=client_transactions,  # 使用更新后的交易列表
                 super_nodes=[node.to_dict() for node in super_nodes]
             )
             
@@ -435,11 +429,11 @@ def train_cluster(args):
                 'transactions': [
                     {
                         'client_id': tx.client_id,
-                        'reputation': tx.reputation,
+                        'reputation': tx.reputation,  # 使用最新的信誉值
                         'timestamp': tx.timestamp,
                         'signature': tx.signature
                     }
-                    for tx in consensus_block.transactions
+                    for tx in consensus_block.transactions  # 使用区块中的交易列表
                 ],
                 'super_nodes': [
                     {

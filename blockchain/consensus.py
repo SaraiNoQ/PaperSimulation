@@ -60,24 +60,33 @@ class SuperNode:
 
 class Transaction:
     """交易类，表示客户端提交的模型更新"""
-    def __init__(self, client_id: str, model_update: Dict[str, Any], 
-                 model_params: Dict[str, torch.Tensor], reputation: float):
+    def __init__(self, client_id: str, model_params: Dict[str, torch.Tensor], reputation: float = 50.0):
         self.client_id = client_id
-        self.model_update = model_update  # 序列化后的模型更新
         self.model_params = model_params  # 原始模型参数
+        self.serialized_model_params = self._serialize_model_params(model_params)  # 序列化后的模型参数
         self.reputation = reputation
         self.timestamp = time.time()
         self.signature = self._sign()
     
+    def _serialize_model_params(self, model_params: Dict[str, torch.Tensor]) -> Dict[str, Any]:
+        """序列化模型参数"""
+        serialized_params = {}
+        for key, value in model_params.items():
+            if isinstance(value, torch.Tensor):
+                serialized_params[key] = value.cpu().detach().numpy().tolist()
+            else:
+                serialized_params[key] = value
+        return serialized_params
+    
     def _sign(self) -> str:
         """对交易进行签名"""
-        # 使用模型更新的哈希值和其他信息生成签名
-        model_update_str = json.dumps(self.model_update, sort_keys=True)
-        model_update_hash = hashlib.sha256(model_update_str.encode()).hexdigest()
+        # 使用序列化后的模型参数的哈希值和其他信息生成签名
+        model_params_str = json.dumps(self.serialized_model_params, sort_keys=True)
+        model_params_hash = hashlib.sha256(model_params_str.encode()).hexdigest()
         
         tx_content = {
             'client_id': self.client_id,
-            'model_update_hash': model_update_hash,
+            'model_params_hash': model_params_hash,
             'reputation': self.reputation,
             'timestamp': self.timestamp
         }
@@ -87,7 +96,7 @@ class Transaction:
     def to_dict(self) -> Dict:
         return {
             'client_id': self.client_id,
-            'model_update': self.model_update,
+            'model_params': self.serialized_model_params,  # 使用序列化后的参数
             'reputation': self.reputation,
             'timestamp': self.timestamp,
             'signature': self.signature
@@ -385,15 +394,14 @@ class Block:
     """区块类，用于共识过程"""
     def __init__(self, previous_hash: str, transactions: List[Transaction], 
                  creator_id: str, cluster_id: int, round_num: int,
-                 model_params: Dict, clients_info: Dict[str, float],
-                 super_nodes: List[Dict]):
+                 model_params: Dict, super_nodes: List[Dict]):
         self.previous_hash = previous_hash
         self.transactions = transactions
         self.creator_id = creator_id
         self.cluster_id = cluster_id
         self.round_num = round_num
         self.model_params = model_params
-        self.clients_info = clients_info
+        self.clients_info = {tx.client_id: tx.reputation for tx in transactions}
         self.super_nodes = super_nodes
         self.timestamp = time.time()
         self.hash = self._calculate_hash()
@@ -465,7 +473,7 @@ class BlockValidator:
         # 验证交易签名
         tx_content = {
             'client_id': transaction.client_id,
-            'model_update': transaction.model_update,
+            'model_params': transaction.model_params,
             'reputation': transaction.reputation,
             'timestamp': transaction.timestamp
         }
@@ -499,7 +507,7 @@ class ConsensusBlockChain:
         # 获取前一个区块的哈希值
         previous_hash = self.chain[-1].hash if self.chain else "0"
         
-        # 创建新区块
+        # 创建新区块（移除 clients_info 参数）
         block = Block(
             previous_hash=previous_hash,
             transactions=transactions,
@@ -507,7 +515,6 @@ class ConsensusBlockChain:
             cluster_id=cluster_id,
             round_num=round_num,
             model_params=model_params,  # 已序列化的模型参数
-            clients_info={tx.client_id: tx.reputation for tx in transactions},
             super_nodes=super_nodes
         )
         

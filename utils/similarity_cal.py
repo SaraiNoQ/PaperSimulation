@@ -1,4 +1,5 @@
 import numpy as np
+import torch
 from utils.models import LeNet
 from abc import ABC, abstractmethod
 from scipy.stats import pearsonr
@@ -6,6 +7,8 @@ from scipy.stats import wasserstein_distance
 from matplotlib import pyplot as plt
 from sklearn.cluster import SpectralClustering
 from sklearn.decomposition import PCA
+from typing import Dict, List
+from blockchain.consensus import Transaction
 
 
 class SimilarityCalculator(ABC):
@@ -255,3 +258,119 @@ def compare_clustering_methods(client_models, client_ids, n_clusters=3):
         }
     
     return results
+
+def calculate_reputation(client_id: str, global_model_params: Dict[str, torch.Tensor], 
+                       transactions: List[Transaction], old_reputation: float = 50.0) -> float:
+    """计算客户端信誉值
+    
+    Args:
+        client_id: 客户端ID
+        global_model_params: 簇内全局模型参数
+        transactions: 交易列表，用于获取客户端的模型参数
+        old_reputation: 历史信誉值，默认为50.0
+        
+    Returns:
+        float: 更新后的信誉值
+    """
+    # 从交易列表中找到对应客户端的交易
+    client_tx = next((tx for tx in transactions if tx.client_id == client_id), None)
+    if client_tx is None:
+        return old_reputation
+    
+    client_model_params = client_tx.model_params
+    
+    # 确保所有张量在同一设备上
+    device = next(iter(global_model_params.values())).device
+    
+    # 计算模型参数差异
+    total_diff = 0
+    total_params = 0
+    for key in global_model_params:
+        if key in client_model_params:
+            # 确保两个张量在同一设备上
+            global_param = global_model_params[key].to(device)
+            client_param = client_model_params[key].to(device)
+            
+            # 计算参数差异
+            diff = torch.abs(client_param - global_param)
+            total_diff += torch.sum(diff).item()
+            total_params += diff.numel()
+    
+    # 计算平均差异
+    avg_diff = total_diff / total_params if total_params > 0 else float('inf')
+    
+    # 计算得分，使用指数衰减
+    k = 0.1  # 衰减系数，可以根据需要调整
+    score = 100 * np.exp(-k * avg_diff)
+    
+    # 更新信誉值
+    alpha = 0.7  # 平滑因子，可以根据需要调整
+    reputation = alpha * old_reputation + (1 - alpha) * score
+    
+    return float(reputation)
+
+def calculate_reputation_by_similarity(client_id: str, global_model_params: Dict[str, torch.Tensor], 
+                       transactions: List[Transaction], old_reputation: float = 50.0) -> float:
+    """使用 Wasserstein 距离计算客户端信誉值
+    
+    Args:
+        client_id: 客户端ID
+        global_model_params: 簇内全局模型参数
+        transactions: 交易列表，用于获取客户端的模型参数
+        old_reputation: 历史信誉值，默认为50.0
+        
+    Returns:
+        float: 更新后的信誉值
+    """
+    # 从交易列表中找到对应客户端的交易
+    client_tx = next((tx for tx in transactions if tx.client_id == client_id), None)
+    if client_tx is None:
+        return old_reputation
+    
+    client_model_params = client_tx.model_params
+    
+    # 确保所有张量在同一设备上
+    device = next(iter(global_model_params.values())).device
+    
+    # 计算每一层的 Wasserstein 距离
+    total_distance = 0
+    num_layers = 0
+    
+    for key in global_model_params:
+        if key in client_model_params:
+            # 确保两个张量在同一设备上
+            global_param = global_model_params[key].to(device)
+            client_param = client_model_params[key].to(device)
+            
+            # 将参数展平并转换为numpy数组
+            global_flat = global_param.cpu().detach().numpy().flatten()
+            client_flat = client_param.cpu().detach().numpy().flatten()
+            
+            # 计算 Wasserstein 距离
+            try:
+                distance = wasserstein_distance(global_flat, client_flat)
+                total_distance += distance
+                num_layers += 1
+            except Exception as e:
+                print(f"警告: 计算层 {key} 的 Wasserstein 距离时出错: {str(e)}")
+                continue
+    
+    # 计算平均距离
+    avg_distance = total_distance / num_layers if num_layers > 0 else float('inf')
+    
+    # 将距离转换为得分（距离越小，得分越高）
+    k = 2.0  # 衰减系数，可以根据需要调整
+    score = 100 * np.exp(-k * avg_distance)
+    
+    # 更新信誉值
+    alpha = 0.7  # 平滑因子，可以根据需要调整
+    reputation = alpha * old_reputation + (1 - alpha) * score
+    
+    # 打印调试信息
+    print(f"\n客户端 {client_id} 信誉值计算:")
+    print(f"- 平均 Wasserstein 距离: {avg_distance:.4f}")
+    print(f"- 计算得分: {score:.2f}")
+    print(f"- 历史信誉值: {old_reputation:.2f}")
+    print(f"- 更新后信誉值: {reputation:.4f}")
+    
+    return float(reputation)
