@@ -1,8 +1,8 @@
 system:
   num_client: 50
   num_local_class: 2
-  dataset: "MNIST"
-  model: "LeNet"
+  dataset: "CIFAR10"
+  model: "AlexCifarNet"
   i_seed: 235235
   num_round: 200
   res_root: "results"

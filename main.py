@@ -19,7 +19,12 @@ from fed_baselines.server_base import FedServer
 
 from postprocessing.recorder import Recorder
 from preprocessing.baselines_dataloader import divide_data, divide_noniid_data
-from utils.similarity_cal import WassersteinSimilarity, PearsonSimilarity, JSDistanceSimilarity, perform_spectral_clustering, visualize_clustering_results, calculate_reputation_by_similarity
+from utils.similarity_cal import (
+    WassersteinSimilarity, PearsonSimilarity, JSDistanceSimilarity, 
+    perform_spectral_clustering, visualize_clustering_results, 
+    calculate_reputation_by_similarity,
+    AlexCifarNetSimilarity
+)
 
 from typing import Dict, Any, List
 from blockchain.block_structure import BlockChain, ClientInfo
@@ -704,15 +709,18 @@ def fed_run():
     
     print("计算模型相似度矩阵...")
 
-    if (config["system"]["similarity_method"] == "wasserstein"):
-        wasserstein_calculator = WassersteinSimilarity(n_clients, client_models, client_ids)
-        similarity_matrix = wasserstein_calculator.compute_similarity_matrix()
-    elif (config["system"]["similarity_method"] == "pearson"):
-        pearson_calculator = PearsonSimilarity(n_clients, client_models, client_ids)
-        similarity_matrix = pearson_calculator.compute_similarity_matrix()
-    elif (config["system"]["similarity_method"] == "js"):
-        js_calculator = JSDistanceSimilarity(n_clients, client_models, client_ids)
-        similarity_matrix = js_calculator.compute_similarity_matrix()
+    # if (config["system"]["similarity_method"] == "wasserstein"):
+    #     wasserstein_calculator = WassersteinSimilarity(n_clients, client_models, client_ids)
+    #     similarity_matrix = wasserstein_calculator.compute_similarity_matrix()
+    # elif (config["system"]["similarity_method"] == "pearson"):
+    #     pearson_calculator = PearsonSimilarity(n_clients, client_models, client_ids)
+    #     similarity_matrix = pearson_calculator.compute_similarity_matrix()
+    # elif (config["system"]["similarity_method"] == "js"):
+    #     js_calculator = JSDistanceSimilarity(n_clients, client_models, client_ids)
+    #     similarity_matrix = js_calculator.compute_similarity_matrix()
+
+    wasserstein_calculator_cifar = AlexCifarNetSimilarity(n_clients, client_models, client_ids, 'fc3')
+    similarity_matrix = wasserstein_calculator_cifar.compute_similarity_matrix()
 
     # 3. 执行谱聚类
     n_clusters = 3  # 可以根据需要调整

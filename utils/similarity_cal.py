@@ -1,6 +1,6 @@
 import numpy as np
 import torch
-from utils.models import LeNet
+from utils.models import LeNet, AlexCifarNet
 from abc import ABC, abstractmethod
 from scipy.stats import pearsonr
 from scipy.stats import wasserstein_distance
@@ -188,6 +188,93 @@ class WassersteinSimilarity(SimilarityCalculator):
         similarity_score = 1 / (1 + distance)
         
         return similarity_score
+
+class AlexCifarNetSimilarity(SimilarityCalculator):
+    """基于 AlexCifarNet 全连接层的相似度计算"""
+    
+    def __init__(self, n_clients, client_models, client_ids, target_layer='all'):
+        """
+        初始化相似度计算器
+        
+        Args:
+            n_clients: 客户端数量
+            client_models: 客户端模型字典
+            client_ids: 客户端ID列表
+            target_layer: 用于计算相似度的目标层
+                         可选值: 'fc1'(4096->384), 'fc2'(384->192), 
+                                'fc3'(192->10), 'all'(所有层加权)
+        """
+        super().__init__(n_clients, client_models, client_ids)
+        self.target_layer = target_layer
+        # 为不同层设置权重
+        self.layer_weights = {
+            'fc1': 0.2,  # 第一层权重较小，因为维度太大，可能包含较多噪声
+            'fc2': 0.3,  # 中间层权重适中
+            'fc3': 0.5   # 最后一层权重最大，因为更接近最终决策
+        }
+    
+    def calculate_similarity(self, model1, model2):
+        """计算两个模型间的相似度"""
+        total_similarity = 0.0
+        
+        # 提取模型的全连接层权重
+        weights1 = {
+            'fc1': model1.classifier[0].weight.detach().cpu().numpy().flatten(),
+            'fc2': model1.classifier[2].weight.detach().cpu().numpy().flatten(),
+            'fc3': model1.classifier[4].weight.detach().cpu().numpy().flatten()
+        }
+        
+        weights2 = {
+            'fc1': model2.classifier[0].weight.detach().cpu().numpy().flatten(),
+            'fc2': model2.classifier[2].weight.detach().cpu().numpy().flatten(),
+            'fc3': model2.classifier[4].weight.detach().cpu().numpy().flatten()
+        }
+        
+        if self.target_layer == 'all':
+            # 使用加权平均计算总体相似度
+            for layer in ['fc1', 'fc2', 'fc3']:
+                # 计算 Wasserstein 距离
+                distance = wasserstein_distance(weights1[layer], weights2[layer])
+                # 将距离转换为相似度并加权
+                similarity = 1 / (1 + distance)
+                total_similarity += self.layer_weights[layer] * similarity
+        else:
+            # 只计算指定层的相似度
+            distance = wasserstein_distance(
+                weights1[self.target_layer], 
+                weights2[self.target_layer]
+            )
+            total_similarity = 1 / (1 + distance)
+        
+        return total_similarity
+
+    def compute_similarity_matrix(self):
+        """计算相似度矩阵"""
+        print(f"AlexCifarNet使用 {self.__class__.__name__} 计算相似度矩阵...")
+        for i in range(self.n_clients):
+            for j in range(i, self.n_clients):
+                # 创建临时 AlexCifarNet 模型
+                model_i = AlexCifarNet()
+                model_j = AlexCifarNet()
+                
+                # 加载状态字典
+                model_i.load_state_dict(self.client_models[self.client_ids[i]])
+                model_j.load_state_dict(self.client_models[self.client_ids[j]])
+                
+                # 计算相似度
+                similarity_score = self.calculate_similarity(model_i, model_j)
+                
+                # 填充相似度矩阵
+                self.similarity_matrix[i, j] = similarity_score
+                self.similarity_matrix[j, i] = similarity_score
+                
+                # 清理内存
+                del model_i
+                del model_j
+                torch.cuda.empty_cache()
+        
+        return self.process_similarity_matrix()
+
 
 def perform_spectral_clustering(similarity_matrix, n_clusters=3):
     """执行谱聚类"""
