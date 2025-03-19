@@ -9,8 +9,8 @@ system:
   noniid: true
   imbalance_factor: 0.6
   similarity_method: "wasserstein"
-  concurrent: false
-  malicious_ratio: 0.5
+  concurrent: true
+  malicious_ratio: 0
   attack_type: "zero"
 
 client:

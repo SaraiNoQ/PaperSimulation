@@ -709,18 +709,23 @@ def fed_run():
     
     print("计算模型相似度矩阵...")
 
-    # if (config["system"]["similarity_method"] == "wasserstein"):
-    #     wasserstein_calculator = WassersteinSimilarity(n_clients, client_models, client_ids)
-    #     similarity_matrix = wasserstein_calculator.compute_similarity_matrix()
-    # elif (config["system"]["similarity_method"] == "pearson"):
-    #     pearson_calculator = PearsonSimilarity(n_clients, client_models, client_ids)
-    #     similarity_matrix = pearson_calculator.compute_similarity_matrix()
-    # elif (config["system"]["similarity_method"] == "js"):
-    #     js_calculator = JSDistanceSimilarity(n_clients, client_models, client_ids)
-    #     similarity_matrix = js_calculator.compute_similarity_matrix()
+    if (config["system"]["dataset"] == "CIFAR10"):
+        wasserstein_calculator_cifar = AlexCifarNetSimilarity(n_clients, client_models, client_ids, 'fc3')
+        similarity_matrix = wasserstein_calculator_cifar.compute_similarity_matrix()
+    elif (config["system"]["dataset"] == "MNIST"):
+        if (config["system"]["similarity_method"] == "wasserstein"):
+            wasserstein_calculator = WassersteinSimilarity(n_clients, client_models, client_ids)
+            similarity_matrix = wasserstein_calculator.compute_similarity_matrix()
+        elif (config["system"]["similarity_method"] == "pearson"):
+            pearson_calculator = PearsonSimilarity(n_clients, client_models, client_ids)
+            similarity_matrix = pearson_calculator.compute_similarity_matrix()
+        elif (config["system"]["similarity_method"] == "js"):
+            js_calculator = JSDistanceSimilarity(n_clients, client_models, client_ids)
+            similarity_matrix = js_calculator.compute_similarity_matrix()
+    else:
+        raise ValueError(f"Unsupported dataset: {config['system']['dataset']}")
 
-    wasserstein_calculator_cifar = AlexCifarNetSimilarity(n_clients, client_models, client_ids, 'fc3')
-    similarity_matrix = wasserstein_calculator_cifar.compute_similarity_matrix()
+    
 
     # 3. 执行谱聚类
     n_clusters = 3  # 可以根据需要调整
