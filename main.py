@@ -226,6 +226,13 @@ def train_cluster(args):
     cluster_id, members, client_dict, cluster_server, cluster_recorder, blockchain, consensus_blockchain, hotstuff_consensus, super_nodes, config, global_round = args
     
     try:
+        # 为每个簇创建新的HotStuff共识实例
+        cluster_hotstuff_consensus = HotStuffConsensus(
+            leader_id=hotstuff_consensus.leader_id,
+            super_node_ids=hotstuff_consensus.super_node_ids,
+            max_retries=hotstuff_consensus.max_retries
+        )
+        
         # 获取设备信息
         device = next(iter(cluster_server.state_dict().values())).device
         
@@ -529,29 +536,28 @@ def train_cluster(args):
         # 序列化超级节点列表
         serialized_super_nodes = serialize_super_nodes(super_nodes)
         
-        # 创建共识区块
-        consensus_block = consensus_blockchain.create_sub_block(
-            cluster_id=int(cluster_id),
-            round_num=len(cluster_recorder.res['server']['iid_accuracy']),
-            model_params=serializable_params,
-            transactions=client_transactions,
-            super_nodes=serialized_super_nodes
-        )
-        
         # 运行共识过程
         consensus_success = run_consensus(
-            hotstuff_consensus, 
+            cluster_hotstuff_consensus,  # 使用新创建的共识实例
             consensus_block, 
             serialized_super_nodes,
             cluster_id
         )
         
         if not consensus_success:
-            raise Exception(f"Failed to reach consensus after {hotstuff_consensus.max_retries} attempts")
+            raise Exception(f"Failed to reach consensus after {cluster_hotstuff_consensus.max_retries} attempts")
         
         # 将共识区块添加到共识链
         consensus_blockchain.add_block(consensus_block)
         print(f'簇 {cluster_id} 区块创建完成，共识验证通过')
+        
+        # 清理簇内其他资源
+        for client_id in members:
+            if client_id in client_dict:
+                client_dict[client_id].model = client_dict[client_id].model.cpu()
+                if hasattr(client_dict[client_id], 'optimizer'):
+                    del client_dict[client_id].optimizer
+                torch.cuda.empty_cache()
         
         # 将服务器模型移回CPU并清理内存
         cluster_server.model = cluster_server.model.cpu()
@@ -564,7 +570,8 @@ def train_cluster(args):
             'accuracy': float(accuracy),
             # 'n_members': int(len(members)),
             'n_members': int(data_num),
-            'sub_block': consensus_block
+            'sub_block': consensus_block,
+            'hotstuff_consensus': cluster_hotstuff_consensus  # 返回新的共识实例
         }
         
     except Exception as e:
@@ -884,6 +891,27 @@ def fed_run():
         except Exception as e:
             print(f"创建主区块时出错: {str(e)}")
             raise e
+            
+        # 现在清理共识相关资源
+        print("\n清理共识相关资源...")
+        for result in cluster_results:
+            if 'hotstuff_consensus' in result:
+                consensus_instance = result['hotstuff_consensus']
+                if hasattr(consensus_instance, 'prepare_messages'):
+                    del consensus_instance.prepare_messages
+                if hasattr(consensus_instance, 'pre_commit_messages'):
+                    del consensus_instance.pre_commit_messages
+                if hasattr(consensus_instance, 'commit_messages'):
+                    del consensus_instance.commit_messages
+                if hasattr(consensus_instance, 'decide_messages'):
+                    del consensus_instance.decide_messages
+        
+        # 清理子链内存
+        for result in cluster_results:
+            if result.get('sub_block'):
+                result['sub_block'].transactions = None
+                result['sub_block'].model_params = None
+                result['sub_block'].super_nodes = None
         
         # 更新每个簇的全局模型
         for cluster_id in clusters.keys():
@@ -947,12 +975,68 @@ def fed_run():
         )
         with open(blockchain_state_filename, 'w') as f:
             json.dump(blockchain.get_chain_info(), f, indent=2)
+            
+        # 清理本轮训练的内存
+        print("\n清理本轮训练的内存...")
+        
+        # 清理顶层服务器内存
+        top_level_server.model = top_level_server.model.cpu()
+        if hasattr(top_level_server, 'optimizer'):
+            del top_level_server.optimizer
+        torch.cuda.empty_cache()
+        
+        # 清理簇服务器内存
+        for cluster_id, cluster_server in cluster_servers.items():
+            cluster_server.model = cluster_server.model.cpu()
+            if hasattr(cluster_server, 'optimizer'):
+                del cluster_server.optimizer
+            torch.cuda.empty_cache()
+        
+        # 清理全局模型参数
+        del global_state_dict
+        del serializable_global_params
+        torch.cuda.empty_cache()
+        
+        print("内存清理完成")
 
     # 验证区块链完整性
     if blockchain.verify_chain():
         print("\n区块链验证成功！")
     else:
         print("\n警告：区块链验证失败！")
+        
+    # 最终清理所有资源
+    print("\n清理所有训练资源...")
+    
+    # 清理客户端资源
+    for client_id, client in client_dict.items():
+        client.model = client.model.cpu()
+        if hasattr(client, 'optimizer'):
+            del client.optimizer
+        torch.cuda.empty_cache()
+    
+    # 清理服务器资源
+    top_level_server.model = top_level_server.model.cpu()
+    if hasattr(top_level_server, 'optimizer'):
+        del top_level_server.optimizer
+    
+    for cluster_server in cluster_servers.values():
+        cluster_server.model = cluster_server.model.cpu()
+        if hasattr(cluster_server, 'optimizer'):
+            del cluster_server.optimizer
+    
+    # 清理区块链资源
+    blockchain.chain = None
+    consensus_blockchain.chain = None
+    
+    # 清理记录器资源
+    for recorder in cluster_recorders.values():
+        recorder.res = None
+    top_level_recorder.res = None
+    
+    # 最后清理GPU缓存
+    torch.cuda.empty_cache()
+    print("所有资源清理完成")
 
 def deserialize_model_params(serialized_params: Dict[str, Any]) -> Dict[str, torch.Tensor]:
     """反序列化模型参数"""
