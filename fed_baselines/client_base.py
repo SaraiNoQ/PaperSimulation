@@ -2,10 +2,8 @@ from utils.models import *
 from utils.fed_utils import assign_dataset, init_model
 from torch.utils.data import DataLoader
 import torch
-from utils.js_cal import calculate_model_similarity
-from tqdm import tqdm
-import sys
 import torch.nn.functional as F
+from utils.cifar_model import train_cifar
 
 class FedClient(object):
     def __init__(self, name, epoch, dataset_id, model_name):
@@ -61,108 +59,113 @@ class FedClient(object):
         self.model = init_model(model_name=self.model_name, num_class=self._num_class, image_channel=self._image_channel)
         self.model.load_state_dict(model_state_dict)
 
-    # def train(self):
-    #     """
-    #     Client trains the model on local dataset
-    #     :return: Local updated model, number of local data points, training loss
-    #     """
-    #     # 1. 数据加载
-    #     train_loader = DataLoader(self.trainset, batch_size=self._batch_size, shuffle=True)
-
-    #     # 2. 模型与优化器设置
-    #     self.model.to(self._device)
-        
-    #     # 设置初始学习率和优化器
-    #     initial_lr = 0.01
-    #     optimizer = torch.optim.AdamW(
-    #         self.model.parameters(),
-    #         lr=initial_lr,
-    #         betas=(0.9, 0.999),
-    #         eps=1e-8,
-    #         weight_decay=0.02
-    #     )
-        
-    #     # 设置学习率调度器
-    #     scheduler = torch.optim.lr_scheduler.StepLR(
-    #         optimizer,
-    #         step_size=5,
-    #         gamma=0.9
-    #     )
-        
-    #     # 设置损失函数
-    #     loss_func = nn.CrossEntropyLoss()
-
-    #     # 3. 训练过程
-    #     total_loss = 0
-    #     for epoch in range(self._epoch):
-    #         epoch_loss = 0
-    #         for step, (x, y) in enumerate(train_loader):
-    #             # 数据搬运到设备
-    #             b_x = x.to(self._device)
-    #             b_y = y.to(self._device)
-
-    #             # 前向传播 + 反向传播
-    #             self.model.train()
-    #             optimizer.zero_grad()
-                
-    #             output = self.model(b_x)
-    #             loss = loss_func(output, b_y.long())
-                
-    #             loss.backward()
-    #             torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)  # 梯度裁剪
-                
-    #             optimizer.step()
-    #             epoch_loss += loss.item()
-            
-    #         # 更新学习率
-    #         scheduler.step()
-            
-    #         # 计算平均损失
-    #         avg_epoch_loss = epoch_loss / len(train_loader)
-    #         total_loss = avg_epoch_loss  # 保存最后一个epoch的损失
-            
-    #         # 打印训练信息（可选）
-    #         if (epoch + 1) % 3 == 0:  # 每3个epoch打印一次
-    #             current_lr = optimizer.param_groups[0]['lr']
-    #             print(f"Client {self.name} - Epoch [{epoch+1}/{self._epoch}], "
-    #                   f"Loss: {avg_epoch_loss:.4f}, "
-    #                   f"Learning Rate: {current_lr:.6f}")
-
-    #     # 返回模型参数和训练信息
-    #     return self.model.state_dict(), self.n_data, total_loss
-    
-    def train(self):
+    def train(self, config):
         """
         Client trains the model on local dataset
         :return: Local updated model, number of local data points, training loss
         """
+        if (config["system"]["dataset"] == "CIFAR10"):
+            return train_cifar(self.model, self.trainset, self._device, self._epoch, self._batch_size, self._lr, self._momentum)
 
         # 1. 数据加载
         train_loader = DataLoader(self.trainset, batch_size=self._batch_size, shuffle=True)
 
         # 2. 模型与优化器设置
         self.model.to(self._device)
-        optimizer = torch.optim.SGD(self.model.parameters(), lr=self._lr, momentum=self._momentum)
-        # optimizer = torch.optim.Adam(self.model.parameters(), lr=self._lr, weight_decay=1e-4)
-
+        
+        # 设置初始学习率和优化器
+        initial_lr = 0.01
+        optimizer = torch.optim.AdamW(
+            self.model.parameters(),
+            lr=initial_lr,
+            betas=(0.9, 0.999),
+            eps=1e-8,
+            weight_decay=0.02
+        )
+        
+        # 设置学习率调度器
+        scheduler = torch.optim.lr_scheduler.StepLR(
+            optimizer,
+            step_size=5,
+            gamma=0.9
+        )
+        
+        # 设置损失函数
         loss_func = nn.CrossEntropyLoss()
 
-        # Training process
+        # 3. 训练过程
+        total_loss = 0
         for epoch in range(self._epoch):
+            epoch_loss = 0
             for step, (x, y) in enumerate(train_loader):
-                with torch.no_grad():
-                    # 数据搬运到设备
-                    b_x = x.to(self._device)  # Tensor on GPU
-                    b_y = y.to(self._device)  # Tensor on GPU
+                # 数据搬运到设备
+                b_x = x.to(self._device)
+                b_y = y.to(self._device)
 
-                with torch.enable_grad():
-                    # 前向传播 + 反向传播
-                    self.model.train()
-                    output = self.model(b_x)
-                    loss = loss_func(output, b_y.long())
-                    optimizer.zero_grad()
-                    loss.backward()
-                    optimizer.step()
+                # 前向传播 + 反向传播
+                self.model.train()
+                optimizer.zero_grad()
+                
+                output = self.model(b_x)
+                loss = loss_func(output, b_y.long())
+                
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)  # 梯度裁剪
+                
+                optimizer.step()
+                epoch_loss += loss.item()
+            
+            # 更新学习率
+            scheduler.step()
+            
+            # 计算平均损失
+            avg_epoch_loss = epoch_loss / len(train_loader)
+            total_loss = avg_epoch_loss  # 保存最后一个epoch的损失
+            
+            # 打印训练信息（可选）
+            if (epoch + 1) % 3 == 0:  # 每3个epoch打印一次
+                current_lr = optimizer.param_groups[0]['lr']
+                print(f"Client {self.name} - Epoch [{epoch+1}/{self._epoch}], "
+                      f"Loss: {avg_epoch_loss:.4f}, "
+                      f"Learning Rate: {current_lr:.6f}")
 
-        # 返回模型的权重参数（Weights），该字典包含模型所有可学习参数（如全连接层权重、卷积核参数等）的当前值
-        return self.model.state_dict(), self.n_data, loss.data.cpu().numpy()
+        # 返回模型参数和训练信息
+        return self.model.state_dict(), self.n_data, total_loss
+    
+    # def train(self, config):
+    #     """
+    #     Client trains the model on local dataset
+    #     :return: Local updated model, number of local data points, training loss
+    #     """
+    #     if (config["system"]["dataset"] == "CIFAR10"):
+    #         return train_cifar(self.model, self.trainset, self._device, self._epoch, self._batch_size, self._lr, self._momentum)
+
+    #     # 1. 数据加载
+    #     train_loader = DataLoader(self.trainset, batch_size=self._batch_size, shuffle=True)
+
+    #     # 2. 模型与优化器设置
+    #     self.model.to(self._device)
+    #     optimizer = torch.optim.SGD(self.model.parameters(), lr=self._lr, momentum=self._momentum)
+    #     # optimizer = torch.optim.Adam(self.model.parameters(), lr=self._lr, weight_decay=1e-4)
+
+    #     loss_func = nn.CrossEntropyLoss()
+
+    #     # Training process
+    #     for epoch in range(self._epoch):
+    #         for step, (x, y) in enumerate(train_loader):
+    #             with torch.no_grad():
+    #                 # 数据搬运到设备
+    #                 b_x = x.to(self._device)  # Tensor on GPU
+    #                 b_y = y.to(self._device)  # Tensor on GPU
+
+    #             with torch.enable_grad():
+    #                 # 前向传播 + 反向传播
+    #                 self.model.train()
+    #                 output = self.model(b_x)
+    #                 loss = loss_func(output, b_y.long())
+    #                 optimizer.zero_grad()
+    #                 loss.backward()
+    #                 optimizer.step()
+
+    #     # 返回模型的权重参数（Weights），该字典包含模型所有可学习参数（如全连接层权重、卷积核参数等）的当前值
+    #     return self.model.state_dict(), self.n_data, loss.data.cpu().numpy()

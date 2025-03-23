@@ -3,10 +3,14 @@ import torch  # PyTorch深度学习框架
 import torchvision  # PyTorch视觉库
 import torchvision.transforms as transforms  # 用于数据预处理和增强
 from tqdm import tqdm  # 进度条显示
-from torch.utils.data import Subset, DataLoader  # 数据集处理工具
+from torch.utils.data import Subset, Dataset, ConcatDataset  # 数据集处理工具
 import os  # 操作系统接口
 import PIL  # 图像处理库
 import numpy as np  # 用于生成狄利克雷分布
+from collections import defaultdict
+from PIL import Image
+import random
+
 
 def load_data(name, root='./data', download=True, save_pre_data=True):
     """
@@ -51,15 +55,48 @@ def load_data(name, root='./data', download=True, save_pre_data=True):
 
 
     elif name == 'CIFAR10':
-
-        transform = transforms.Compose([
+        # CIFAR10的训练集数据增强
+        train_transform = transforms.Compose([
+            transforms.RandomCrop(32, padding=4),  # 随机裁剪
+            transforms.RandomHorizontalFlip(),      # 随机水平翻转
+            transforms.ColorJitter(
+                brightness=0.2,  # 亮度
+                contrast=0.2,    # 对比度
+                saturation=0.2,  # 饱和度
+                hue=0.1         # 色相
+            ),
             transforms.ToTensor(),
-            transforms.Normalize(mean=[0.4914, 0.4822, 0.4465], std=[0.2023, 0.1994, 0.2010])])
-
-        trainset = torchvision.datasets.CIFAR10(root=root, train=True, download=download, transform=transform)
-        testset = torchvision.datasets.CIFAR10(root=root, train=False, download=download, transform=transform)
-        trainset.targets = torch.Tensor(trainset.targets)
-        testset.targets = torch.Tensor(testset.targets)
+            transforms.Normalize(
+                mean=[0.4914, 0.4822, 0.4465],  # CIFAR10的RGB通道均值
+                std=[0.2023, 0.1994, 0.2010]    # CIFAR10的RGB通道标准差
+            ),
+        ])
+        
+        # 测试集只需要标准化处理
+        test_transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize(
+                mean=[0.4914, 0.4822, 0.4465],
+                std=[0.2023, 0.1994, 0.2010]
+            ),
+        ])
+        
+        trainset = torchvision.datasets.CIFAR10(
+            root=root, 
+            train=True, 
+            download=download, 
+            transform=train_transform
+        )
+        testset = torchvision.datasets.CIFAR10(
+            root=root, 
+            train=False, 
+            download=download, 
+            transform=test_transform
+        )
+        
+        # 将标签转换为张量
+        trainset.targets = torch.tensor(trainset.targets, dtype=torch.long)
+        testset.targets = torch.tensor(testset.targets, dtype=torch.long)
 
     elif name == 'CIFAR100':
         transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])])
@@ -301,6 +338,214 @@ def divide_noniid_data(num_client=1, imbalance_factor=0.6, dataset_name='emnist'
             print("-" * 30)
     
     return trainset_config, testset
+
+# 首先定义CustomCIFAR10Subset类
+class CustomCIFAR10Subset(Dataset):
+    """自定义CIFAR10子集，支持数据增强"""
+    def __init__(self, dataset, indices, transform=None):
+        self.dataset = dataset
+        self.indices = indices
+        self.transform = transform
+        
+    def __getitem__(self, idx):
+        img = self.dataset.data[self.indices[idx]]
+        label = self.dataset.targets[self.indices[idx]]
+        img = Image.fromarray(img)
+        
+        if self.transform:
+            img = self.transform(img)
+            
+        return img, label
+    
+    def __len__(self):
+        return len(self.indices)
+
+class MemoryCIFAR10Subset(Dataset):
+    """将CIFAR10数据预加载到内存的数据集"""
+    def __init__(self, dataset, indices, transform=None, is_augment=False):
+        # 预加载数据到内存
+        self.data = [dataset.data[i] for i in indices]
+        self.targets = [dataset.targets[i] for i in indices]
+        self.transform = transform
+        self.is_augment = is_augment
+        
+        # 基础转换
+        self.base_transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize(
+                mean=[0.4914, 0.4822, 0.4465],
+                std=[0.2023, 0.1994, 0.2010]
+            )
+        ])
+        
+        # 额外的数据增强
+        self.extra_transform = transforms.Compose([
+            transforms.RandomCrop(32, padding=4),
+            transforms.RandomHorizontalFlip(),
+            transforms.ColorJitter(
+                brightness=0.2,
+                contrast=0.2,
+                saturation=0.2,
+                hue=0.1
+            ),
+            transforms.RandomRotation(15),
+            transforms.RandomAffine(degrees=0, translate=(0.1, 0.1))
+        ])
+    
+    def __getitem__(self, idx):
+        img = self.data[idx]
+        label = self.targets[idx]
+        img = Image.fromarray(img)
+        
+        # 应用基础转换
+        if not self.is_augment:
+            img = self.base_transform(img)
+        else:
+            # 应用额外的数据增强
+            img = self.extra_transform(img)
+            img = self.base_transform(img)
+            
+        return img, label
+    
+    def __len__(self):
+        return len(self.data)
+
+def divide_data_cifar(num_client=10, alpha=0.5, seed=42, min_size=50):
+    """
+    改进的CIFAR10数据划分方法，支持数据重复分配
+    
+    Args:
+        num_client: 客户端数量
+        alpha: Dirichlet分布的alpha参数
+        seed: 随机种子
+        min_size: 每个类别的最小样本数
+    """
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    random.seed(seed)
+    
+    # 加载数据集
+    trainset, testset, num_classes = load_data('CIFAR10')
+    labels = np.array(trainset.targets)
+    
+    # 使用Dirichlet分布进行初始数据划分
+    client_proportions = np.random.dirichlet(alpha=[alpha] * num_client, size=num_classes)
+    
+    # 存储每个客户端的数据索引
+    client_data_indices = [[] for _ in range(num_client)]
+    
+    # 按类别划分数据
+    for cls_idx in range(num_classes):
+        # 获取当前类别的所有索引
+        cls_indices = np.where(labels == cls_idx)[0]
+        
+        # 计算每个客户端应获得的样本数
+        proportions = client_proportions[cls_idx]
+        proportions = proportions / proportions.sum()
+        required_samples = np.maximum(
+            min_size,  # 至少需要min_size个样本
+            (proportions * len(cls_indices)).astype(int)
+        )
+        
+        # 如果需要的总样本数超过现有样本数，则需要重复采样
+        total_required = sum(required_samples)
+        if total_required > len(cls_indices):
+            # 计算需要重复的次数
+            repeat_times = int(np.ceil(total_required / len(cls_indices)))
+            # 重复数据
+            cls_indices = np.tile(cls_indices, repeat_times)
+            # 打乱顺序
+            np.random.shuffle(cls_indices)
+        
+        # 分配数据给各个客户端
+        start_idx = 0
+        for client_idx in range(num_client):
+            end_idx = start_idx + required_samples[client_idx]
+            client_data_indices[client_idx].extend(cls_indices[start_idx:end_idx])
+            start_idx = end_idx
+    
+    # 创建数据集配置
+    trainset_config = {
+        'users': [],
+        'user_data': {},
+        'num_samples': []
+    }
+    
+    # 为每个客户端创建数据集
+    for i in range(num_client):
+        user_id = f'f_{i:05d}'
+        trainset_config['users'].append(user_id)
+        
+        # 打乱当前客户端的数据索引
+        client_indices = client_data_indices[i]
+        np.random.shuffle(client_indices)
+        
+        # 创建基础数据集
+        base_dataset = MemoryCIFAR10Subset(
+            trainset, 
+            client_indices,
+            is_augment=False
+        )
+        
+        # 创建增强数据集
+        augmented_dataset = MemoryCIFAR10Subset(
+            trainset, 
+            client_indices,
+            is_augment=True
+        )
+        
+        # 合并数据集
+        combined_dataset = ConcatDataset([base_dataset, augmented_dataset])
+        
+        trainset_config['user_data'][user_id] = combined_dataset
+        trainset_config['num_samples'].append(len(combined_dataset))
+        
+        # 打印每个客户端的类别分布
+        client_labels = [trainset.targets[idx] for idx in client_indices]
+        unique_labels, counts = np.unique(client_labels, return_counts=True)
+        print(f"\nClient {user_id} class distribution:")
+        total_samples = sum(counts)
+        for label, count in zip(unique_labels, counts):
+            print(f"Class {label}: {count} samples ({count/total_samples*100:.2f}%)")
+        print(f"Total samples: {total_samples}")
+    
+    return trainset_config, testset
+
+def create_mixed_batches(dataset, batch_size=32):
+    """创建混合批次，确保每个批次包含多个类别的样本"""
+    labels = np.array(dataset.targets)
+    n_classes = len(np.unique(labels))
+    
+    # 按类别组织数据索引
+    class_indices = defaultdict(list)
+    for idx, label in enumerate(labels):
+        class_indices[label].append(idx)
+    
+    # 计算每个批次中每个类别的样本数
+    samples_per_class = batch_size // n_classes
+    
+    batches = []
+    while True:
+        batch = []
+        for class_label in range(n_classes):
+            if len(class_indices[class_label]) >= samples_per_class:
+                # 随机选择样本
+                selected = random.sample(class_indices[class_label], samples_per_class)
+                batch.extend(selected)
+                # 移除已选择的样本
+                class_indices[class_label] = [i for i in class_indices[class_label] if i not in selected]
+            else:
+                # 如果某个类别的样本不足，停止创建批次
+                return batches
+        
+        if len(batch) == batch_size:
+            batches.append(batch)
+        
+        # 检查是否所有类别都没有足够的样本
+        if all(len(indices) < samples_per_class for indices in class_indices.values()):
+            break
+    
+    return batches
 
 if __name__ == "__main__":
     # 'MNIST', 'EMNIST', 'FashionMNIST', 'CelebA', 'CIFAR10', 'QMNIST', 'SVHN'

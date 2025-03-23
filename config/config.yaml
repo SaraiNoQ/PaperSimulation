@@ -12,6 +12,8 @@ system:
   concurrent: true
   malicious_ratio: 0
   attack_type: "zero"
+  cifar_noniid_factor: 1.0
+  cifar_min_size: 200
 
 client:
   fed_algo: "FedAvg"

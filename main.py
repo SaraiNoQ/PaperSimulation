@@ -18,7 +18,7 @@ from fed_baselines.client_base import FedClient
 from fed_baselines.server_base import FedServer
 
 from postprocessing.recorder import Recorder
-from preprocessing.baselines_dataloader import divide_data, divide_noniid_data
+from preprocessing.baselines_dataloader import divide_data, divide_noniid_data, divide_data_cifar
 from utils.similarity_cal import (
     WassersteinSimilarity, PearsonSimilarity, JSDistanceSimilarity, 
     perform_spectral_clustering, visualize_clustering_results, 
@@ -269,7 +269,7 @@ def train_cluster(args):
                 client_dict[client_id].update(cluster_global_state)
                 
                 # 本地训练得到模型参数、数据量和loss
-                state_dict, n_data, loss = client_dict[client_id].train()
+                state_dict, n_data, loss = client_dict[client_id].train(config)
 
                 # 模拟恶意节点攻击
                 if random.random() < malicious_ratio:
@@ -668,8 +668,11 @@ def fed_run():
     client_dict = {}
     recorder = Recorder()
 
+
     # trainset_config {'users': ['user_id1', ...], 'user_data': {'user_id1': train_data, ...}, 'num_samples': number}
-    if (config["system"]["noniid"]):
+    if (config["system"]["dataset"] == "CIFAR10"):
+        trainset_config, testset = divide_data_cifar(num_client=config["system"]["num_client"], alpha=config["system"]["cifar_noniid_factor"], min_size=config["system"]["cifar_min_size"])
+    elif (config["system"]["noniid"]):
         trainset_config, testset = divide_noniid_data(num_client=config["system"]["num_client"], 
                                         imbalance_factor=config["system"]["imbalance_factor"], 
                                         dataset_name=config["system"]["dataset"],
@@ -707,7 +710,7 @@ def fed_run():
         # 更新使用全局模型
         client_dict[client_id].update(global_state_dict)
         # 本地训练得到模型参数
-        state_dict, n_data, loss = client_dict[client_id].train()
+        state_dict, n_data, loss = client_dict[client_id].train(config)
         client_models[client_id] = state_dict
 
     # 2. 使用JS散度相似度计算器进行聚类
