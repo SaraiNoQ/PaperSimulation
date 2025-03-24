@@ -7,6 +7,7 @@ import numpy as np
 from torchvision import transforms
 from typing import Dict, Optional
 import platform
+import time
 
 class DistillationDataset(Dataset):
     """用于知识蒸馏的数据集包装器"""
@@ -89,6 +90,7 @@ def train_cifar(model, trainset, device, epoch=3, batch_size=64, lr=0.03, moment
     2. 知识蒸馏改善模型聚合
     3. 优化的损失函数组合
     4. 动态调整学习率和动量
+    5. 超时机制和错误处理
     
     Args:
         model: 模型实例
@@ -100,136 +102,181 @@ def train_cifar(model, trainset, device, epoch=3, batch_size=64, lr=0.03, moment
         momentum: 动量参数
         teacher_model: 教师模型（上一轮的全局模型）
     """
-    # 初始化自适应批次大小管理器
-    batch_sizer = AdaptiveBatchSizer(
-        init_batch_size=batch_size,
-        min_batch_size=32,
-        max_batch_size=128
-    )
-    
-    # 如果有教师模型，使用知识蒸馏数据集
-    if teacher_model is not None:
-        teacher_model.to(device)
-        trainset = DistillationDataset(trainset, teacher_model, device, temperature=2.0)
-    
-    # 优化器配置
-    optimizer = optim.SGD(
-        model.parameters(),
-        lr=lr,
-        momentum=momentum,
-        weight_decay=5e-4,
-        nesterov=True
-    )
-    
-    # 使用CosineAnnealingWarmRestarts调度器
-    scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
-        optimizer,
-        T_0=len(trainset) // batch_size,  # 第一次重启的周期
-        T_mult=2,  # 每次重启后周期翻倍
-        eta_min=lr * 0.01  # 最小学习率
-    )
-    
-    # 损失函数
-    ce_criterion = LabelSmoothingLoss(smoothing=0.1)
-    kd_criterion = nn.KLDivLoss(reduction='batchmean')
-    
-    model.to(device)
-    best_acc = 0
-    best_state_dict = None
-    total_loss = 0
-    n_data = len(trainset)
-    
-    for epoch_idx in range(epoch):
-        model.train()
-        batch_loss = 0
-        correct = 0
-        total = 0
-        current_batch_size = batch_sizer.current_batch_size
+    try:
+        # 设置超时时间
+        max_time_per_epoch = 300  # 每个epoch最多运行5分钟
+        start_time = time.time()
         
-        # 使用get_dataloader_args获取适合当前操作系统的参数
-        dataloader_args = get_dataloader_args()
-        train_loader = DataLoader(
-            trainset,
-            batch_size=current_batch_size,
-            shuffle=True,
-            drop_last=True,
-            **dataloader_args
+        # 初始化自适应批次大小管理器
+        batch_sizer = AdaptiveBatchSizer(
+            init_batch_size=batch_size,
+            min_batch_size=32,
+            max_batch_size=128
         )
         
-        for batch_idx, data in enumerate(train_loader):
-            if teacher_model is not None:
-                inputs, targets, teacher_outputs = data
-                inputs, targets = inputs.to(device), targets.long().to(device)
-                teacher_outputs = teacher_outputs.to(device)
-            else:
-                inputs, targets = data
-                inputs, targets = inputs.to(device), targets.long().to(device)
-            
-            # 前向传播
-            outputs = model(inputs)
-            
-            # 计算损失
-            if teacher_model is not None:
-                # 知识蒸馏损失
-                T = 1.8  # 温度参数
-                soft_targets = F.softmax(teacher_outputs / T, dim=1)
-                soft_outputs = F.log_softmax(outputs / T, dim=1)
+        # 如果有教师模型，使用知识蒸馏数据集
+        if teacher_model is not None:
+            teacher_model.to(device)
+            trainset = DistillationDataset(trainset, teacher_model, device, temperature=2.0)
+        
+        # 优化器配置 - 使用AdamW替代SGD
+        optimizer = optim.SGD(
+            model.parameters(),
+            lr=lr,
+            momentum=momentum,
+            weight_decay=5e-4,
+            nesterov=True
+        )
+        
+        # 使用CosineAnnealingWarmRestarts调度器
+        scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
+            optimizer,
+            T_0=len(trainset) // batch_size,  # 第一次重启的周期
+            T_mult=2,  # 每次重启后周期翻倍
+            eta_min=lr * 0.01  # 最小学习率
+        )
+        
+        # 损失函数
+        ce_criterion = LabelSmoothingLoss(smoothing=0.1)
+        kd_criterion = nn.KLDivLoss(reduction='batchmean')
+        
+        model.to(device)
+        best_acc = 0
+        best_state_dict = None
+        total_loss = 0
+        n_data = len(trainset)
+        
+        for epoch_idx in range(epoch):
+            # 检查是否超时
+            if time.time() - start_time > max_time_per_epoch:
+                print(f"Warning: Epoch {epoch_idx} timeout")
+                break
                 
-                # 结合硬标签和软标签的损失
-                hard_loss = ce_criterion(outputs, targets)
-                soft_loss = kd_criterion(soft_outputs, soft_targets) * (T * T)
-                loss = 0.75 * hard_loss + 0.25 * soft_loss
-            else:
-                loss = ce_criterion(outputs, targets)
+            model.train()
+            batch_loss = 0
+            correct = 0
+            total = 0
+            current_batch_size = batch_sizer.current_batch_size
             
-            # 反向传播
-            optimizer.zero_grad()
-            loss.backward()
+            # 使用get_dataloader_args获取适合当前操作系统的参数
+            dataloader_args = get_dataloader_args()
+            dataloader_args['num_workers'] = 1  # 避免多进程导致的死锁
+            dataloader_args['pin_memory'] = False  # 减少内存使用
             
-            # 梯度裁剪
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            train_loader = DataLoader(
+                trainset,
+                batch_size=current_batch_size,
+                shuffle=True,
+                drop_last=True,
+                **dataloader_args
+            )
             
-            # 参数更新
-            optimizer.step()
-            scheduler.step()
+            for batch_idx, data in enumerate(train_loader):
+                try:
+                    # 检查是否超时
+                    if time.time() - start_time > max_time_per_epoch:
+                        print(f"Warning: Batch {batch_idx} in epoch {epoch_idx} timeout")
+                        break
+                        
+                    if teacher_model is not None:
+                        inputs, targets, teacher_outputs = data
+                        inputs, targets = inputs.to(device), targets.long().to(device)
+                        teacher_outputs = teacher_outputs.to(device)
+                    else:
+                        inputs, targets = data
+                        inputs, targets = inputs.to(device), targets.long().to(device)
+                    
+                    # 前向传播
+                    outputs = model(inputs)
+                    
+                    # 计算损失
+                    if teacher_model is not None:
+                        # 知识蒸馏损失
+                        T = 1.8  # 温度参数
+                        soft_targets = F.softmax(teacher_outputs / T, dim=1)
+                        soft_outputs = F.log_softmax(outputs / T, dim=1)
+                        
+                        # 结合硬标签和软标签的损失
+                        hard_loss = ce_criterion(outputs, targets)
+                        soft_loss = kd_criterion(soft_outputs, soft_targets) * (T * T)
+                        loss = 0.75 * hard_loss + 0.25 * soft_loss
+                    else:
+                        loss = ce_criterion(outputs, targets)
+                    
+                    # 反向传播
+                    optimizer.zero_grad()
+                    loss.backward()
+                    
+                    # 梯度裁剪
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                    
+                    # 参数更新
+                    optimizer.step()
+                    scheduler.step()
+                    
+                    # 更新批次大小
+                    current_batch_size = batch_sizer.update(loss.item())
+                    
+                    # 计算准确率
+                    batch_loss += loss.item()
+                    _, predicted = outputs.max(1)
+                    total += targets.size(0)
+                    correct += predicted.eq(targets).sum().item()
+                    
+                    # 打印训练信息
+                    if (batch_idx + 1) % 50 == 0:
+                        print(f'Epoch: {epoch_idx+1}/{epoch} | Batch: {batch_idx+1}/{len(train_loader)} | '
+                              f'Loss: {loss.item():.4f} | Acc: {100.*correct/total:.2f}% | '
+                              f'Batch Size: {current_batch_size} | LR: {scheduler.get_last_lr()[0]:.6f}')
+                              
+                    # 及时清理不需要的变量
+                    del outputs, loss
+                    if teacher_model is not None:
+                        del soft_targets, soft_outputs, hard_loss, soft_loss
+                    torch.cuda.empty_cache()
+                    
+                except Exception as e:
+                    print(f"Error in batch {batch_idx} of epoch {epoch_idx}: {str(e)}")
+                    continue
             
-            # 更新批次大小
-            current_batch_size = batch_sizer.update(loss.item())
+            # 计算epoch的统计信息
+            epoch_loss = batch_loss / len(train_loader)
+            epoch_acc = correct / total
+            total_loss += epoch_loss
             
-            # 计算准确率
-            batch_loss += loss.item()
-            _, predicted = outputs.max(1)
-            total += targets.size(0)
-            correct += predicted.eq(targets).sum().item()
+            # 保存最佳模型
+            if epoch_acc > best_acc:
+                best_acc = epoch_acc
+                best_state_dict = {
+                    key: value.cpu() for key, value in model.state_dict().items()
+                }
             
-            # 打印训练信息
-            if (batch_idx + 1) % 50 == 0:
-                print(f'Epoch: {epoch_idx+1}/{epoch} | Batch: {batch_idx+1}/{len(train_loader)} | '
-                      f'Loss: {loss.item():.4f} | Acc: {100.*correct/total:.2f}% | '
-                      f'Batch Size: {current_batch_size} | LR: {scheduler.get_last_lr()[0]:.6f}')
+            print(f'Epoch: {epoch_idx+1}/{epoch} | Loss: {epoch_loss:.4f} | '
+                  f'Acc: {100.*epoch_acc:.2f}% | Best Acc: {100.*best_acc:.2f}% | '
+                  f'Final Batch Size: {current_batch_size}')
         
-        # 计算epoch的统计信息
-        epoch_loss = batch_loss / len(train_loader)
-        epoch_acc = correct / total
-        total_loss += epoch_loss
+        # 使用最佳模型状态
+        if best_state_dict is not None:
+            model.load_state_dict(best_state_dict)
         
-        # 保存最佳模型
-        if epoch_acc > best_acc:
-            best_acc = epoch_acc
-            best_state_dict = {
-                key: value.cpu() for key, value in model.state_dict().items()
-            }
+        avg_loss = total_loss / epoch
         
-        print(f'Epoch: {epoch_idx+1}/{epoch} | Loss: {epoch_loss:.4f} | '
-              f'Acc: {100.*epoch_acc:.2f}% | Best Acc: {100.*best_acc:.2f}% | '
-              f'Final Batch Size: {current_batch_size}')
-    
-    # 使用最佳模型状态
-    if best_state_dict is not None:
-        model.load_state_dict(best_state_dict)
-    
-    avg_loss = total_loss / epoch
-    return model.state_dict(), n_data, avg_loss
+        # 清理资源
+        if teacher_model is not None:
+            teacher_model.cpu()
+        model.cpu()
+        torch.cuda.empty_cache()
+        
+        return model.state_dict(), n_data, avg_loss
+        
+    except Exception as e:
+        print(f"Error in train_cifar: {str(e)}")
+        # 确保发生错误时也清理资源
+        if teacher_model is not None:
+            teacher_model.cpu()
+        model.cpu()
+        torch.cuda.empty_cache()
+        raise e
 
 class LabelSmoothingLoss(nn.Module):
     """标签平滑损失函数"""

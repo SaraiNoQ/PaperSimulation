@@ -295,17 +295,17 @@ def train_cluster(args):
                 client_states[client_id] = (state_dict, int(n_data), float(loss))
                 
                 # 将客户端模型移回CPU并清理内存
-                client_dict[client_id].model = client_dict[client_id].model.cpu()
-                if hasattr(client_dict[client_id], 'optimizer'):
-                    client_dict[client_id].optimizer = None
-                torch.cuda.empty_cache()
+                # client_dict[client_id].model = client_dict[client_id].model.cpu()
+                # if hasattr(client_dict[client_id], 'optimizer'):
+                #     client_dict[client_id].optimizer = None
+                # torch.cuda.empty_cache()
                 
             except Exception as e:
                 print(f"Error training client {client_id} in cluster {cluster_id}: {str(e)}")
                 continue
 
         # 计算超级节点数量（至少5个，且为总节点数的20%）
-        num_super_nodes = max(5, int(len(members) * 0.2))
+        num_super_nodes = max(min(5, len(members)), int(len(members) * 0.2))
         
         # 执行DPoS选举
         dpos_election = DPoSElection(
@@ -427,7 +427,7 @@ def train_cluster(args):
             
             # 将共识区块添加到链上
             consensus_blockchain.add_block(consensus_block)
-            print(f'簇 {cluster_id} 区块创建完成，共识验证通过')
+            print(f'簇 {cluster_id} 共识验证通过')
 
             # 保存子区块内容到JSON文件
             sub_block_content = {
@@ -552,16 +552,16 @@ def train_cluster(args):
         print(f'簇 {cluster_id} 区块创建完成，共识验证通过')
         
         # 清理簇内其他资源
-        for client_id in members:
-            if client_id in client_dict:
-                client_dict[client_id].model = client_dict[client_id].model.cpu()
-                if hasattr(client_dict[client_id], 'optimizer'):
-                    del client_dict[client_id].optimizer
-                torch.cuda.empty_cache()
+        # for client_id in members:
+        #     if client_id in client_dict:
+        #         client_dict[client_id].model = client_dict[client_id].model.cpu()
+        #         if hasattr(client_dict[client_id], 'optimizer'):
+        #             del client_dict[client_id].optimizer
+                # torch.cuda.empty_cache()
         
         # 将服务器模型移回CPU并清理内存
-        cluster_server.model = cluster_server.model.cpu()
-        torch.cuda.empty_cache()
+        # cluster_server.model = cluster_server.model.cpu()
+        # torch.cuda.empty_cache()
         
         return {
             'cluster_id': int(cluster_id),
@@ -577,9 +577,9 @@ def train_cluster(args):
     except Exception as e:
         print(f"Error in cluster {cluster_id} training: {str(e)}")
         # 确保发生错误时也清理GPU内存
-        if hasattr(cluster_server, 'model'):
-            cluster_server.model = cluster_server.model.cpu()
-        torch.cuda.empty_cache()
+        # if hasattr(cluster_server, 'model'):
+        #     cluster_server.model = cluster_server.model.cpu()
+        # torch.cuda.empty_cache()
         raise e
 
 def train_clusters_sequential(clusters, client_dict, cluster_servers, cluster_recorders, blockchain, consensus_blockchain, hotstuff_consensus, super_nodes, config, global_round):
@@ -590,7 +590,7 @@ def train_clusters_sequential(clusters, client_dict, cluster_servers, cluster_re
     for cluster_id, members in clusters.items():
         try:
             # 在每个簇开始训练前清理GPU内存
-            torch.cuda.empty_cache()
+            # torch.cuda.empty_cache()
             
             result = train_cluster((cluster_id, members, client_dict, 
                                   cluster_servers[cluster_id], 
@@ -604,44 +604,102 @@ def train_clusters_sequential(clusters, client_dict, cluster_servers, cluster_re
             cluster_results.append(result)
             
             # 在每个簇训练后清理GPU内存
-            torch.cuda.empty_cache()
+            # torch.cuda.empty_cache()
             
         except Exception as e:
             print(f"Cluster {cluster_id} training failed: {str(e)}")
             # 确保发生错误时也清理GPU内存
-            torch.cuda.empty_cache()
+            # torch.cuda.empty_cache()
     return cluster_results
 
 def train_clusters_concurrent(clusters, client_dict, cluster_servers, cluster_recorders, blockchain, consensus_blockchain, num_threads, hotstuff_consensus, super_nodes, config, global_round):
     """
     并发训练所有簇
-    """
-    cluster_results = []
-    with ThreadPoolExecutor(max_workers=num_threads) as executor:
-        # 准备每个簇的训练参数
-        cluster_args = [
-            (cluster_id, members, client_dict, cluster_servers[cluster_id], 
-             cluster_recorders[cluster_id], blockchain, consensus_blockchain, 
-             hotstuff_consensus, super_nodes, config, global_round)
-            for cluster_id, members in clusters.items()
-        ]
-        
-        # 并行执行簇内训练
-        future_to_cluster = {
-            executor.submit(train_cluster, args): args[0]
-            for args in cluster_args
-        }
-        
-        # 收集训练结果
-        for future in concurrent.futures.as_completed(future_to_cluster):
-            try:
-                result = future.result()
-                cluster_results.append(result)
-            except Exception as e:
-                cluster_id = future_to_cluster[future]
-                print(f"Cluster {cluster_id} training failed: {str(e)}")
     
-    return cluster_results
+    改进：
+    1. 添加超时机制
+    2. 更好的错误处理
+    3. 资源清理保证
+    4. 线程池管理优化
+    """
+    try:
+        # 设置整体超时时间
+        max_total_time = 3600  # 1小时
+        start_time = time.time()
+        
+        cluster_results = []
+        # 使用上下文管理器确保线程池正确关闭
+        with ThreadPoolExecutor(max_workers=num_threads) as executor:
+            try:
+                # 准备每个簇的训练参数
+                cluster_args = [
+                    (cluster_id, members, client_dict, cluster_servers[cluster_id], 
+                     cluster_recorders[cluster_id], blockchain, consensus_blockchain, 
+                     hotstuff_consensus, super_nodes, config, global_round)
+                    for cluster_id, members in clusters.items()
+                ]
+                
+                # 并行执行簇内训练
+                future_to_cluster = {
+                    executor.submit(train_cluster, args): args[0]
+                    for args in cluster_args
+                }
+                
+                # 收集训练结果
+                for future in concurrent.futures.as_completed(future_to_cluster):
+                    try:
+                        # 检查是否超时
+                        if time.time() - start_time > max_total_time:
+                            print("Warning: Total training timeout")
+                            executor.shutdown(wait=False)  # 强制关闭线程池
+                            break
+                            
+                        cluster_id = future_to_cluster[future]
+                        try:
+                            result = future.result(timeout=600)  # 10分钟超时
+                            cluster_results.append(result)
+                            print(f"簇 {cluster_id} 训练完成")
+                            
+                        except concurrent.futures.TimeoutError:
+                            print(f"簇 {cluster_id} 训练超时")
+                            future.cancel()
+                            # 清理资源
+                            if cluster_id in cluster_servers:
+                                cluster_servers[cluster_id].model = cluster_servers[cluster_id].model.cpu()
+                                if hasattr(cluster_servers[cluster_id], 'optimizer'):
+                                    del cluster_servers[cluster_id].optimizer
+                            torch.cuda.empty_cache()
+                            
+                    except Exception as e:
+                        cluster_id = future_to_cluster[future]
+                        print(f"簇 {cluster_id} 训练失败: {str(e)}")
+                        # 清理资源
+                        if cluster_id in cluster_servers:
+                            cluster_servers[cluster_id].model = cluster_servers[cluster_id].model.cpu()
+                            if hasattr(cluster_servers[cluster_id], 'optimizer'):
+                                del cluster_servers[cluster_id].optimizer
+                        torch.cuda.empty_cache()
+                        
+            except Exception as e:
+                print(f"并发训练过程中出错: {str(e)}")
+                executor.shutdown(wait=False)  # 强制关闭线程池
+                raise e
+                
+        # 检查是否所有簇都完成训练
+        if len(cluster_results) < len(clusters):
+            print(f"警告: 只有 {len(cluster_results)}/{len(clusters)} 个簇完成训练")
+            
+        return cluster_results
+        
+    except Exception as e:
+        print(f"训练簇时发生错误: {str(e)}")
+        # 确保清理所有资源
+        for cluster_id, cluster_server in cluster_servers.items():
+            cluster_server.model = cluster_server.model.cpu()
+            if hasattr(cluster_server, 'optimizer'):
+                del cluster_server.optimizer
+        torch.cuda.empty_cache()
+        raise e
 
 def fed_run():
     args = fed_args()
@@ -986,19 +1044,19 @@ def fed_run():
         top_level_server.model = top_level_server.model.cpu()
         if hasattr(top_level_server, 'optimizer'):
             del top_level_server.optimizer
-        torch.cuda.empty_cache()
+        # torch.cuda.empty_cache()
         
         # 清理簇服务器内存
         for cluster_id, cluster_server in cluster_servers.items():
             cluster_server.model = cluster_server.model.cpu()
             if hasattr(cluster_server, 'optimizer'):
                 del cluster_server.optimizer
-            torch.cuda.empty_cache()
+            # torch.cuda.empty_cache()
         
         # 清理全局模型参数
         del global_state_dict
         del serializable_global_params
-        torch.cuda.empty_cache()
+        # torch.cuda.empty_cache()
         
         print("内存清理完成")
 
@@ -1016,7 +1074,7 @@ def fed_run():
         client.model = client.model.cpu()
         if hasattr(client, 'optimizer'):
             del client.optimizer
-        torch.cuda.empty_cache()
+        # torch.cuda.empty_cache()
     
     # 清理服务器资源
     top_level_server.model = top_level_server.model.cpu()
